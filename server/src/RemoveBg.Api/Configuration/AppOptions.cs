@@ -3,6 +3,7 @@ namespace RemoveBg.Api.Configuration;
 public sealed class DatabaseOptions
 {
     public const string SectionName = "Database";
+    public string Provider { get; init; } = "MySql";
     public string ConnectionString { get; init; } =
         "Server=localhost;Port=3306;Database=removebg;User=removebg;Password=removebg";
 }
@@ -22,9 +23,43 @@ public sealed class RemovalOptions
     public int InputSize { get; init; } = 1024;
     public long MaxUploadBytes { get; init; } = 15 * 1024 * 1024;
     public long MaxImagePixels { get; init; } = 40_000_000;
-    public int CpuWorkers { get; init; } = 1;
-    public int IntraOpThreads { get; init; } = 4;
+    public int CpuWorkers { get; init; }
+    public int IntraOpThreads { get; init; }
+    public int QueueCapacity { get; init; }
     public int QueueWaitSeconds { get; init; } = 30;
+    public int PngCompressionLevel { get; init; } = 1;
+    public string ExecutionProvider { get; init; } = "Cpu";
+    public string CoreMlModelFormat { get; init; } = "NeuralNetwork";
+    public string CoreMlComputeUnits { get; init; } = "CPUAndGPU";
+}
+
+public sealed record RemovalRuntimeSettings(
+    int WorkerCount,
+    int IntraOpThreads,
+    int QueueCapacity,
+    int QueueWaitSeconds,
+    int PngCompressionLevel)
+{
+    public static RemovalRuntimeSettings Resolve(RemovalOptions options, int processorCount)
+    {
+        processorCount = Math.Max(1, processorCount);
+        var workers = options.CpuWorkers > 0
+            ? options.CpuWorkers
+            : Math.Clamp((processorCount + 2) / 3, 1, 2);
+        var intraOpThreads = options.IntraOpThreads > 0
+            ? options.IntraOpThreads
+            : Math.Max(1, processorCount / workers);
+        var queueCapacity = options.QueueCapacity > 0
+            ? options.QueueCapacity
+            : workers * 2;
+
+        return new RemovalRuntimeSettings(
+            workers,
+            intraOpThreads,
+            queueCapacity,
+            Math.Max(0, options.QueueWaitSeconds),
+            Math.Clamp(options.PngCompressionLevel, 0, 9));
+    }
 }
 
 public sealed class PricingOptions

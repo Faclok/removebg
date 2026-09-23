@@ -16,6 +16,7 @@ htmlcov/
 /models/
 server/src/RemoveBg.Api/runtime/
 server/src/RemoveBg.Api/models/
+server/src/RemoveBg.Api/removebg-local.db*
 dist/
 build/
 node_modules/

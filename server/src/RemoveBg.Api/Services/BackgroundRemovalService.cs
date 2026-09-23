@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Threading.Channels;
 using Microsoft.Extensions.Options;
 using Microsoft.ML.OnnxRuntime;
 using RemoveBg.Api.Configuration;
@@ -12,6 +14,7 @@ namespace RemoveBg.Api.Services;
 public interface IBackgroundRemovalService
 {
     bool IsReady { get; }
+    string Device { get; }
     Task WarmUpAsync(CancellationToken cancellationToken);
     Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken);
 }
@@ -24,28 +27,34 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
     private static readonly float[] Std = [0.229f, 0.224f, 0.225f];
 
     private readonly RemovalOptions options;
+    private readonly RemovalRuntimeSettings runtime;
     private readonly IHttpClientFactory httpClientFactory;
     private readonly ILogger<BackgroundRemovalService> logger;
-    private readonly SemaphoreSlim workers;
+    private readonly PrePackedWeightsContainer prepackedWeights = new();
     private readonly SemaphoreSlim initializationLock = new(1, 1);
-    private volatile InferenceSession? session;
+    private volatile Channel<InferenceSession>? sessionPool;
+    private InferenceSession[] sessions = [];
+    private string[] inputNames = [];
+    private string[] outputNames = [];
+    private string device = "initializing";
 
-    public bool IsReady => session is not null;
+    public bool IsReady => sessionPool is not null;
+    public string Device => device;
 
     public BackgroundRemovalService(
         IOptions<RemovalOptions> options,
+        RemovalRuntimeSettings runtime,
         IHttpClientFactory httpClientFactory,
         ILogger<BackgroundRemovalService> logger)
     {
         this.options = options.Value;
+        this.runtime = runtime;
         this.httpClientFactory = httpClientFactory;
         this.logger = logger;
-        var workerCount = Math.Max(1, this.options.CpuWorkers);
-        workers = new SemaphoreSlim(workerCount, workerCount);
     }
 
     public async Task WarmUpAsync(CancellationToken cancellationToken) =>
-        _ = await GetSessionAsync(cancellationToken);
+        _ = await GetSessionPoolAsync(cancellationToken);
 
     public async Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
     {
@@ -58,27 +67,20 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
                 "Модель запускается, повторите запрос через несколько секунд");
         }
 
-        var entered = await workers.WaitAsync(
-            TimeSpan.FromSeconds(Math.Max(0, options.QueueWaitSeconds)),
-            cancellationToken);
-        if (!entered)
-        {
-            throw new ApiException(
-                StatusCodes.Status429TooManyRequests,
-                "server_busy",
-                "Очередь обработки занята, повторите запрос позже");
-        }
-
+        var pool = await GetSessionPoolAsync(cancellationToken);
+        var activeSession = await pool.Reader.ReadAsync(cancellationToken);
         try
         {
-            var activeSession = await GetSessionAsync(cancellationToken);
             return await Task.Run(
                 () => RunInference(input, imageInfo, activeSession),
                 cancellationToken);
         }
         finally
         {
-            workers.Release();
+            if (!pool.Writer.TryWrite(activeSession))
+            {
+                logger.LogError("Failed to return an ONNX session to the worker pool");
+            }
         }
     }
 
@@ -100,36 +102,124 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         return codec.Info;
     }
 
-    private async Task<InferenceSession> GetSessionAsync(CancellationToken cancellationToken)
+    private async Task<Channel<InferenceSession>> GetSessionPoolAsync(
+        CancellationToken cancellationToken)
     {
-        if (session is not null)
+        if (sessionPool is not null)
         {
-            return session;
+            return sessionPool;
         }
 
         await initializationLock.WaitAsync(cancellationToken);
         try
         {
-            if (session is not null)
+            if (sessionPool is not null)
             {
-                return session;
+                return sessionPool;
             }
 
             await EnsureModelAsync(cancellationToken);
-            var sessionOptions = new Microsoft.ML.OnnxRuntime.SessionOptions
+            var createdSessions = new List<InferenceSession>(runtime.WorkerCount);
+            try
             {
-                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-                IntraOpNumThreads = options.IntraOpThreads,
-                InterOpNumThreads = 1,
-                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL
-            };
-            session = new InferenceSession(options.ModelPath, sessionOptions);
-            logger.LogInformation("Loaded ONNX model {ModelPath} with CPU execution provider", options.ModelPath);
-            return session;
+                for (var worker = 0; worker < runtime.WorkerCount; worker++)
+                {
+                    using var sessionOptions = CreateSessionOptions();
+                    createdSessions.Add(new InferenceSession(
+                        options.ModelPath,
+                        sessionOptions,
+                        prepackedWeights));
+                }
+            }
+            catch
+            {
+                foreach (var createdSession in createdSessions)
+                {
+                    createdSession.Dispose();
+                }
+                throw;
+            }
+
+            sessions = createdSessions.ToArray();
+            inputNames = [sessions[0].InputNames[0]];
+            outputNames = sessions[0].OutputNames.ToArray();
+            var pool = Channel.CreateBounded<InferenceSession>(new BoundedChannelOptions(
+                runtime.WorkerCount)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = false,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false
+            });
+            foreach (var createdSession in sessions)
+            {
+                pool.Writer.TryWrite(createdSession);
+            }
+            sessionPool = pool;
+            logger.LogInformation(
+                "Loaded {SessionCount} ONNX sessions for {ModelPath} with {ExecutionProvider}; intra-op threads per session={IntraOpThreads}",
+                sessions.Length,
+                options.ModelPath,
+                device,
+                runtime.IntraOpThreads);
+            return pool;
         }
         finally
         {
             initializationLock.Release();
+        }
+    }
+
+    private Microsoft.ML.OnnxRuntime.SessionOptions CreateSessionOptions()
+    {
+        var sessionOptions = new Microsoft.ML.OnnxRuntime.SessionOptions
+        {
+            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+            IntraOpNumThreads = runtime.IntraOpThreads,
+            InterOpNumThreads = 1,
+            ExecutionMode = ExecutionMode.ORT_SEQUENTIAL
+        };
+
+        var provider = options.ExecutionProvider.Trim();
+        var useCoreMl = provider.Equals("CoreML", StringComparison.OrdinalIgnoreCase)
+            || provider.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+                && OperatingSystem.IsMacOS()
+                && RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
+
+        if (!useCoreMl)
+        {
+            device = "cpu";
+            return sessionOptions;
+        }
+
+        try
+        {
+            sessionOptions.AppendExecutionProvider(
+                "CoreML",
+                new Dictionary<string, string>
+                {
+                    ["ModelFormat"] = options.CoreMlModelFormat,
+                    ["MLComputeUnits"] = options.CoreMlComputeUnits,
+                    ["RequireStaticInputShapes"] = "1",
+                    ["EnableOnSubgraphs"] = "0"
+                });
+            device = $"coreml-{options.CoreMlComputeUnits.ToLowerInvariant()}";
+            return sessionOptions;
+        }
+        catch (Exception exception) when (provider.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning(
+                exception,
+                "CoreML is unavailable; falling back to the CPU execution provider");
+            sessionOptions.Dispose();
+            device = "cpu";
+            return new Microsoft.ML.OnnxRuntime.SessionOptions
+            {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                IntraOpNumThreads = runtime.IntraOpThreads,
+                InterOpNumThreads = 1,
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL
+            };
         }
     }
 
@@ -221,7 +311,6 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
                 tensor,
                 [1, 3, options.InputSize, options.InputSize]);
             using var runOptions = new RunOptions();
-            var inputNames = new[] { activeSession.InputNames[0] };
             var inputValues = new[] { inputValue };
             using var outputs = activeSession.Run(
                 runOptions,
@@ -243,7 +332,11 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         }
 
         using var output = new MemoryStream();
-        if (!original.Encode(output, SKEncodedImageFormat.Png, 100))
+        using var pixmap = original.PeekPixels();
+        var pngOptions = new SKPngEncoderOptions(
+            SKPngEncoderFilterFlags.Sub,
+            runtime.PngCompressionLevel);
+        if (pixmap is null || !pixmap.Encode(output, pngOptions))
         {
             throw new ApiException(503, "encoding_failed", "Не удалось закодировать результат");
         }
@@ -332,8 +425,12 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
 
     public void Dispose()
     {
-        session?.Dispose();
-        workers.Dispose();
+        sessionPool?.Writer.TryComplete();
+        foreach (var activeSession in sessions)
+        {
+            activeSession.Dispose();
+        }
+        prepackedWeights.Dispose();
         initializationLock.Dispose();
     }
 }

@@ -1,6 +1,4 @@
-using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 using RemoveBg.Api.Configuration;
@@ -21,38 +19,26 @@ builder.Services.Configure<AdminOptions>(builder.Configuration.GetSection(AdminO
 var removalConfiguration = builder.Configuration
     .GetSection(RemovalOptions.SectionName)
     .Get<RemovalOptions>() ?? new RemovalOptions();
-builder.Services.AddRateLimiter(rateLimiter =>
-{
-    rateLimiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    rateLimiter.AddConcurrencyLimiter("image-processing", limiter =>
-    {
-        limiter.PermitLimit = Math.Max(1, removalConfiguration.CpuWorkers);
-        limiter.QueueLimit = 0;
-        limiter.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
-    });
-    rateLimiter.OnRejected = async (context, cancellationToken) =>
-    {
-        context.HttpContext.Response.Headers.RetryAfter = "5";
-        await context.HttpContext.Response.WriteAsJsonAsync(
-            new
-            {
-                error = new
-                {
-                    code = "server_busy",
-                    message = "Сервер уже обрабатывает максимально допустимое число изображений",
-                    requestId = context.HttpContext.GetRequestId()
-                }
-            },
-            cancellationToken);
-    };
-});
+var removalRuntime = RemovalRuntimeSettings.Resolve(
+    removalConfiguration,
+    Environment.ProcessorCount);
+builder.Services.AddSingleton(removalRuntime);
+builder.Services.AddSingleton<ImageProcessingGate>();
 
 builder.Services.AddDbContext<AppDbContext>((services, options) =>
 {
     var configuration = services.GetRequiredService<IConfiguration>();
+    var provider = configuration[$"{DatabaseOptions.SectionName}:Provider"] ?? "MySql";
     var connectionString = configuration[$"{DatabaseOptions.SectionName}:ConnectionString"]
         ?? throw new InvalidOperationException("Database:ConnectionString is required");
-    options.UseMySQL(connectionString, mysql => mysql.EnableRetryOnFailure(5));
+    if (provider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
+    {
+        options.UseSqlite(connectionString);
+    }
+    else
+    {
+        options.UseMySQL(connectionString, mysql => mysql.EnableRetryOnFailure(5));
+    }
 });
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddSingleton<IBackgroundRemovalService, BackgroundRemovalService>();
@@ -75,7 +61,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "Удалифон API",
         Version = "v1",
-        Description = "CPU-only удаление фона, рублёвый баланс и API-ключи"
+        Description = "Удаление фона через ONNX Runtime, рублёвый баланс и API-ключи"
     });
     options.AddSecurityDefinition("ApiKeyAuth", new OpenApiSecurityScheme
     {
@@ -109,7 +95,6 @@ app.UseSwaggerUI(options =>
 });
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseRateLimiter();
 
 app.MapGet("/health/live", () => Results.Ok(new { status = "ok" }))
     .WithTags("Health")
@@ -117,16 +102,37 @@ app.MapGet("/health/live", () => Results.Ok(new { status = "ok" }))
 app.MapGet("/health/ready", async (
         AppDbContext db,
         IBackgroundRemovalService removal,
+        ImageProcessingGate gate,
+        RemovalRuntimeSettings runtime,
         CancellationToken cancellationToken) =>
     {
         await db.Database.ExecuteSqlRawAsync("SELECT 1", cancellationToken);
         if (!removal.IsReady)
         {
             return Results.Json(
-                new { status = "warming_up", database = "ready", model = "loading", device = "cpu" },
+                new
+                {
+                    status = "warming_up",
+                    database = "ready",
+                    model = "loading",
+                    device = removal.Device,
+                    workers = runtime.WorkerCount,
+                    active = gate.ActiveCount,
+                    queued = gate.QueuedCount
+                },
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
-        return Results.Ok(new { status = "ready", model = "birefnet-general-lite", device = "cpu" });
+        return Results.Ok(new
+        {
+            status = "ready",
+            model = "birefnet-general-lite",
+            device = removal.Device,
+            workers = runtime.WorkerCount,
+            intraOpThreads = runtime.IntraOpThreads,
+            queueCapacity = runtime.QueueCapacity,
+            active = gate.ActiveCount,
+            queued = gate.QueuedCount
+        });
     })
     .WithTags("Health")
     .AllowAnonymous();
@@ -139,7 +145,11 @@ static async Task InitializeDatabaseAsync(WebApplication app)
 {
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    if (app.Environment.IsEnvironment("Testing"))
+    var databaseOptions = app.Configuration
+        .GetSection(DatabaseOptions.SectionName)
+        .Get<DatabaseOptions>() ?? new DatabaseOptions();
+    if (app.Environment.IsEnvironment("Testing")
+        || databaseOptions.Provider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
     {
         await db.Database.EnsureCreatedAsync();
         return;

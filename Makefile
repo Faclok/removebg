@@ -1,10 +1,13 @@
-.PHONY: restore dev build test format migrate client-install client-dev client-build db-up docker-up docker-down
+.PHONY: restore dev local-api build test format migrate client-install client-dev client-build db-up docker-up docker-down
 
 restore:
 	cd server && dotnet restore RemoveBg.slnx
 
 dev:
 	cd server && dotnet watch --project src/RemoveBg.Api
+
+local-api:
+	cd server && dotnet run --project src/RemoveBg.Api --launch-profile local-apple-silicon
 
 build:
 	cd server && dotnet build RemoveBg.slnx --no-restore

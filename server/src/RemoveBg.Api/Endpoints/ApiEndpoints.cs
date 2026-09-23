@@ -49,8 +49,7 @@ public static class ApiEndpoints
             .Produces<ErrorEnvelope>(422)
             .Produces<ErrorEnvelope>(429)
             .Produces<ErrorEnvelope>(503)
-            .DisableAntiforgery()
-            .RequireRateLimiting("image-processing");
+            .DisableAntiforgery();
         authorized.MapGet("/usage", GetUsageAsync)
             .WithName("GetUsage")
             .WithSummary("Получить статистику и журнал обработок")
@@ -162,6 +161,8 @@ public static class ApiEndpoints
         AppDbContext db,
         BillingService billing,
         IBackgroundRemovalService removal,
+        ImageProcessingGate processingGate,
+        ILogger<Program> logger,
         IOptions<RemovalOptions> options,
         CancellationToken cancellationToken)
     {
@@ -170,6 +171,10 @@ public static class ApiEndpoints
         var apiKeyId = context.User.GetApiKeyId();
         var requestId = context.GetRequestId();
 
+        if (context.Request.Form.Files.Count != 1)
+        {
+            throw new ApiException(422, "single_image_required", "Один запрос должен содержать ровно одно изображение");
+        }
         if (!AllowedContentTypes.Contains(image.ContentType.ToLowerInvariant()))
         {
             throw new ApiException(415, "unsupported_media_type", "Поддерживаются JPEG, PNG и WebP");
@@ -194,17 +199,20 @@ public static class ApiEndpoints
             throw new ApiException(402, "insufficient_funds", "Недостаточно средств на балансе");
         }
 
-        byte[] input;
-        await using (var stream = new MemoryStream((int)image.Length))
+        var input = GC.AllocateUninitializedArray<byte>((int)image.Length);
+        await using (var stream = image.OpenReadStream())
         {
-            await image.CopyToAsync(stream, cancellationToken);
-            input = stream.ToArray();
+            await stream.ReadExactlyAsync(input.AsMemory(), cancellationToken);
         }
 
         RemovalResult result;
+        var processingLease = await processingGate.AcquireAsync(cancellationToken);
         try
         {
-            result = await removal.RemoveAsync(input, cancellationToken);
+            using (processingLease)
+            {
+                result = await removal.RemoveAsync(input, cancellationToken);
+            }
         }
         catch (ApiException exception)
         {
@@ -221,6 +229,10 @@ public static class ApiEndpoints
         }
         catch (Exception exception)
         {
+            logger.LogError(
+                exception,
+                "Image processing failed for request {RequestId}",
+                requestId);
             await billing.RecordFailureAsync(
                 requestId,
                 accountId,
@@ -248,6 +260,8 @@ public static class ApiEndpoints
             cancellationToken);
         context.Response.Headers["X-Image-Width"] = result.Width.ToString();
         context.Response.Headers["X-Image-Height"] = result.Height.ToString();
+        context.Response.Headers["X-Processing-Duration-Ms"] = result.DurationMs.ToString();
+        context.Response.Headers["Server-Timing"] = $"image;dur={result.DurationMs}";
         context.Response.Headers["X-Charged-Rub"] = BillingService.Rubles(price)
             .ToString("0.00", CultureInfo.InvariantCulture);
         context.Response.Headers["X-Balance-Rub"] = BillingService.Rubles(balanceAfter)

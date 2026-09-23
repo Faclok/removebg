@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.ML.OnnxRuntime;
+using RemoveBg.Api.Configuration;
 using RemoveBg.Api.Services;
 using SkiaSharp;
 using Xunit;
@@ -64,6 +65,16 @@ public sealed class ApiTests
     }
 
     [Fact]
+    public void SixCpuAutoProfileUsesTwoThreeThreadWorkers()
+    {
+        var runtime = RemovalRuntimeSettings.Resolve(new RemovalOptions(), 6);
+
+        Assert.Equal(2, runtime.WorkerCount);
+        Assert.Equal(3, runtime.IntraOpThreads);
+        Assert.Equal(4, runtime.QueueCapacity);
+    }
+
+    [Fact]
     public async Task RegistrationCreatesApiKeyAndOneThousandRubles()
     {
         using var factory = new ApiFactory();
@@ -121,7 +132,26 @@ public sealed class ApiTests
     }
 
     [Fact]
-    public async Task ConcurrentRemovalIsRejectedBeforeItCanOverloadTheWorker()
+    public async Task RequestWithMoreThanOneImageIsRejected()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+        var account = await RegisterAsync(client, "two-images@example.ru");
+        client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
+
+        using var form = ImageForm();
+        var second = new ByteArrayContent(SamplePng());
+        second.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        form.Add(second, "image", "second.png");
+        var response = await client.PostAsync("/v1/remove-background", form);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("single_image_required", error.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task RequestBeyondConfiguredConcurrencyIsRejected()
     {
         var removal = new BlockingRemovalService();
         using var factory = new ApiFactory(removalService: removal);
@@ -145,6 +175,35 @@ public sealed class ApiTests
 
         var completed = await firstRequest;
         Assert.Equal(HttpStatusCode.OK, completed.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConfiguredWorkersProcessSeveralRequestsAtTheSameTime()
+    {
+        var removal = new BlockingRemovalService(expectedStarts: 3);
+        using var factory = new ApiFactory(removalService: removal, workerCount: 3);
+        using var client = factory.CreateClient();
+        var account = await RegisterAsync(client, "parallel@example.ru");
+        client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
+
+        using var firstForm = ImageForm();
+        using var secondForm = ImageForm();
+        using var thirdForm = ImageForm();
+        var requests = new[]
+        {
+            client.PostAsync("/v1/remove-background", firstForm),
+            client.PostAsync("/v1/remove-background", secondForm),
+            client.PostAsync("/v1/remove-background", thirdForm)
+        };
+        await removal.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var excessForm = ImageForm();
+        var excess = await client.PostAsync("/v1/remove-background", excessForm);
+        Assert.Equal(HttpStatusCode.TooManyRequests, excess.StatusCode);
+
+        removal.Release();
+        var completed = await Task.WhenAll(requests);
+        Assert.All(completed, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
     }
 
     [Fact]

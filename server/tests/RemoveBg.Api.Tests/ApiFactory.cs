@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using RemoveBg.Api.Configuration;
 using RemoveBg.Api.Data;
 using RemoveBg.Api.Services;
 
@@ -17,13 +18,22 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     private readonly bool failProcessing;
     private readonly IBackgroundRemovalService? removalService;
     private readonly string databasePath;
+    private readonly int workerCount;
+    private readonly int queueCapacity;
+    private readonly int queueWaitSeconds;
 
     public ApiFactory(
         bool failProcessing = false,
-        IBackgroundRemovalService? removalService = null)
+        IBackgroundRemovalService? removalService = null,
+        int workerCount = 1,
+        int queueCapacity = 0,
+        int queueWaitSeconds = 0)
     {
         this.failProcessing = failProcessing;
         this.removalService = removalService;
+        this.workerCount = workerCount;
+        this.queueCapacity = queueCapacity;
+        this.queueWaitSeconds = queueWaitSeconds;
         var testDirectory = Path.Combine(AppContext.BaseDirectory, "test-data");
         Directory.CreateDirectory(testDirectory);
         databasePath = Path.Combine(testDirectory, $"removebg-tests-{Guid.NewGuid():N}.db");
@@ -37,11 +47,24 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Accounts:StartingBalanceKopecks"] = "100000",
-                ["Admin:Token"] = "test-admin-token"
+                ["Admin:Token"] = "test-admin-token",
+                ["Removal:CpuWorkers"] = workerCount.ToString(),
+                ["Removal:IntraOpThreads"] = "1",
+                ["Removal:QueueCapacity"] = queueCapacity.ToString(),
+                ["Removal:QueueWaitSeconds"] = queueWaitSeconds.ToString()
             });
         });
         builder.ConfigureTestServices(services =>
         {
+            services.RemoveAll<RemovalRuntimeSettings>();
+            services.RemoveAll<ImageProcessingGate>();
+            services.AddSingleton(new RemovalRuntimeSettings(
+                workerCount,
+                1,
+                queueCapacity,
+                queueWaitSeconds,
+                1));
+            services.AddSingleton<ImageProcessingGate>();
             services.RemoveAll<IDbContextOptionsConfiguration<AppDbContext>>();
             services.RemoveAll<DbContextOptions<AppDbContext>>();
             services.AddDbContext<AppDbContext>(options =>
@@ -75,21 +98,26 @@ internal sealed class TestRetryingExecutionStrategy(ExecutionStrategyDependencie
     protected override bool ShouldRetryOn(Exception exception) => false;
 }
 
-public sealed class BlockingRemovalService : IBackgroundRemovalService
+public sealed class BlockingRemovalService(int expectedStarts = 1) : IBackgroundRemovalService
 {
     private static readonly byte[] Png = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
     private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int startedCount;
 
     public bool IsReady => true;
+    public string Device => "test";
     public Task Started => started.Task;
 
     public Task WarmUpAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public async Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
     {
-        started.TrySetResult();
+        if (Interlocked.Increment(ref startedCount) >= expectedStarts)
+        {
+            started.TrySetResult();
+        }
         await released.Task.WaitAsync(cancellationToken);
         return new RemovalResult(Png, 1, 1, 1);
     }
@@ -103,6 +131,7 @@ public sealed class FakeRemovalService(bool failProcessing) : IBackgroundRemoval
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
     public bool IsReady => true;
+    public string Device => "test";
 
     public Task WarmUpAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 

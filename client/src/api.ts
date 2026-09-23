@@ -55,6 +55,11 @@ export type Health = {
   database?: string;
   model?: string;
   device?: string;
+  workers?: number;
+  intraOpThreads?: number;
+  queueCapacity?: number;
+  active?: number;
+  queued?: number;
 };
 
 export class ApiError extends Error {
