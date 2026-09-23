@@ -31,6 +31,13 @@ Runtime и возвращает прозрачный PNG. Python и GPU не и�
 Nginx отдаёт кабинет с `/` и перенаправляет `/v1`, `/docs`, `/swagger` и `/health`
 в контейнер API. Поэтому браузер и внешние клиенты используют один адрес.
 
+## Структура репозитория
+
+- `server/` — .NET solution, исходники API, тесты и Dockerfile сервера;
+- `client/` — React-приложение, Nginx и Dockerfile клиента;
+- `docs/` — документация проекта;
+- в корне находятся только конфигурационные файлы Compose, Git, env и Makefile.
+
 ## Запуск в Docker
 
 ```bash
@@ -82,6 +89,7 @@ Dockerfile автоматически публикует нативные зав
 Нужны .NET SDK 10 и Node.js 24+.
 
 ```bash
+cd server
 dotnet restore RemoveBg.slnx
 dotnet run --project src/RemoveBg.Api
 ```
@@ -89,7 +97,7 @@ dotnet run --project src/RemoveBg.Api
 Во втором терминале:
 
 ```bash
-cd web
+cd client
 npm install
 npm run dev
 ```
@@ -158,10 +166,12 @@ curl -sS http://localhost:8000/v1/remove-background \
 ## Проверка
 
 ```bash
+cd server
 dotnet build RemoveBg.slnx
 dotnet test RemoveBg.slnx
 dotnet format RemoveBg.slnx --verify-no-changes
-cd web && npm run build
+cd ..
+cd client && npm run build
 ```
 
 Интеграционные тесты подменяют ML-обработчик, поэтому не скачивают модель.

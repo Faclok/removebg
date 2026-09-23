@@ -11,9 +11,11 @@ htmlcov/
 .vs/
 .idea/
 .vscode/
-data/
-runtime/
-models/
+/data/
+/runtime/
+/models/
+server/src/RemoveBg.Api/runtime/
+server/src/RemoveBg.Api/models/
 dist/
 build/
 node_modules/

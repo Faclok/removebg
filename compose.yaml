@@ -1,7 +1,7 @@
 services:
   api:
     build:
-      context: .
+      context: ./server
       dockerfile: Dockerfile
     restart: unless-stopped
     expose:
@@ -33,7 +33,7 @@ services:
 
   web:
     build:
-      context: ./web
+      context: ./client
       dockerfile: Dockerfile
     restart: unless-stopped
     expose:

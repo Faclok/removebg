@@ -2,8 +2,6 @@
 .venv
 __pycache__
 .pytest_cache
-data
-models
-**/models
+src/RemoveBg.Api/models
 **/bin
 **/obj
