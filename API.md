@@ -1,6 +1,8 @@
 # API
 
-Базовый URL в Docker: `http://localhost:8000`.
+Базовый URL в Docker: `http://localhost:8000`. Веб-кабинет доступен на `/`,
+Swagger UI — на `/docs`. При локальном запуске самого API без Nginx стандартный адрес
+ASP.NET Core — `http://localhost:5000`.
 
 Интерактивная схема ASP.NET Core доступна в Swagger UI по `/docs`. Ниже —
 короткая интеграционная инструкция.

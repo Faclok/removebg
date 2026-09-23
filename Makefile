@@ -1,4 +1,4 @@
-.PHONY: restore dev build test format docker-up docker-down
+.PHONY: restore dev build test format web-install web-dev web-build docker-up docker-down
 
 restore:
 	dotnet restore RemoveBg.slnx
@@ -14,6 +14,15 @@ test:
 
 format:
 	dotnet format RemoveBg.slnx
+
+web-install:
+	cd web && npm install
+
+web-dev:
+	cd web && npm run dev
+
+web-build:
+	cd web && npm run build
 
 docker-up:
 	docker compose up --build

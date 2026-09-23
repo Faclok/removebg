@@ -16,4 +16,6 @@ runtime/
 models/
 dist/
 build/
+node_modules/
+*.tsbuildinfo
 *.egg-info/
