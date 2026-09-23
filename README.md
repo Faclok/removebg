@@ -36,8 +36,31 @@ Nginx отдаёт кабинет с `/` и перенаправляет `/v1`, 
 ```bash
 cp .env.example .env
 # Замените Admin__Token в .env на случайную длинную строку
-docker compose up --build
+docker compose -f compose.yaml -f compose.local.yaml up --build
 ```
+
+### Развёртывание в Coolify
+
+Создайте ресурс типа **Docker Compose** из репозитория и укажите только `compose.yaml`
+(локальный override `compose.local.yaml` в Coolify подключать не нужно).
+Публичный домен назначайте сервису `web` на внутренний порт `80`; сервис `api`
+должен оставаться внутренним. Постоянные данные находятся в volumes
+`removebg-data` и `removebg-models`.
+
+В переменных окружения Coolify задайте как минимум:
+
+```env
+ASPNETCORE_ENVIRONMENT=Production
+Admin__Token=замените-на-длинную-случайную-строку
+```
+
+Переменные объявлены непосредственно в `compose.yaml`, поэтому отдельный файл `.env`
+на сервере не требуется. После разбора Compose они появятся в разделе
+**Environment Variables** ресурса Coolify.
+
+Dockerfile автоматически публикует нативные зависимости только для архитектуры
+сервера (`amd64` или `arm64`). Это существенно уменьшает размер API-образа и расход
+диска во время сборки.
 
 После запуска:
 

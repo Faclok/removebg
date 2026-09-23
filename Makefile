@@ -25,7 +25,7 @@ web-build:
 	cd web && npm run build
 
 docker-up:
-	docker compose up --build
+	docker compose -f compose.yaml -f compose.local.yaml up --build
 
 docker-down:
-	docker compose down
+	docker compose -f compose.yaml -f compose.local.yaml down

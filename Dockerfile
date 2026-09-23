@@ -1,15 +1,30 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+ARG TARGETARCH=amd64
 
 COPY global.json RemoveBg.slnx ./
 COPY src/RemoveBg.Api/RemoveBg.Api.csproj src/RemoveBg.Api/
-RUN dotnet restore src/RemoveBg.Api/RemoveBg.Api.csproj
+RUN case "$TARGETARCH" in \
+        amd64) dotnet_arch=x64 ;; \
+        arm64) dotnet_arch=arm64 ;; \
+        *) echo "Unsupported Docker architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && dotnet restore src/RemoveBg.Api/RemoveBg.Api.csproj \
+        --runtime "linux-$dotnet_arch"
 
 COPY src/RemoveBg.Api src/RemoveBg.Api
-RUN dotnet publish src/RemoveBg.Api/RemoveBg.Api.csproj \
-    --configuration Release \
-    --output /app/publish \
-    --no-restore
+RUN case "$TARGETARCH" in \
+        amd64) dotnet_arch=x64 ;; \
+        arm64) dotnet_arch=arm64 ;; \
+        *) echo "Unsupported Docker architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && dotnet publish src/RemoveBg.Api/RemoveBg.Api.csproj \
+        --configuration Release \
+        --runtime "linux-$dotnet_arch" \
+        --self-contained false \
+        --output /app/publish \
+        --no-restore \
+        -p:UseAppHost=false
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 USER root

@@ -1,14 +1,21 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     expose:
       - "8000"
-    env_file:
-      - .env
     environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       Database__ConnectionString: Data Source=/data/removebg.db
+      Accounts__StartingBalanceKopecks: ${Accounts__StartingBalanceKopecks:-100000}
       Removal__ModelPath: /models/birefnet-general-lite.onnx
+      Removal__CpuWorkers: ${Removal__CpuWorkers:-2}
+      Removal__IntraOpThreads: ${Removal__IntraOpThreads:-4}
+      Removal__MaxUploadBytes: ${Removal__MaxUploadBytes:-15728640}
+      Removal__MaxImagePixels: ${Removal__MaxImagePixels:-40000000}
+      Admin__Token: ${Admin__Token:-}
     volumes:
       - removebg-data:/data
       - removebg-models:/models
@@ -27,9 +34,10 @@ services:
   web:
     build:
       context: ./web
+      dockerfile: Dockerfile
     restart: unless-stopped
-    ports:
-      - "8000:80"
+    expose:
+      - "80"
     depends_on:
       api:
         condition: service_healthy
