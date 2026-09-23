@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Threading.Channels;
 using Microsoft.Extensions.Options;
 using Microsoft.ML.OnnxRuntime;
+using Microsoft.ML.OnnxRuntime.Tensors;
 using RemoveBg.Api.Configuration;
 using RemoveBg.Api.Infrastructure;
 using SkiaSharp;
@@ -141,8 +142,11 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
             }
 
             sessions = createdSessions.ToArray();
+            ValidateModelContract(sessions[0]);
             inputNames = [sessions[0].InputNames[0]];
-            outputNames = sessions[0].OutputNames.ToArray();
+            // Background removal needs only the primary mask. Requesting every
+            // exported auxiliary output needlessly keeps large decoder tensors alive.
+            outputNames = [sessions[0].OutputNames[0]];
             var pool = Channel.CreateBounded<InferenceSession>(new BoundedChannelOptions(
                 runtime.WorkerCount)
             {
@@ -223,6 +227,35 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         }
     }
 
+    private void ValidateModelContract(InferenceSession activeSession)
+    {
+        var inputName = activeSession.InputNames[0];
+        var input = activeSession.InputMetadata[inputName];
+        var expectedInput = new[] { 1, 3, options.InputSize, options.InputSize };
+        if (!input.IsTensor
+            || input.ElementDataType != TensorElementType.Float
+            || !input.Dimensions.SequenceEqual(expectedInput))
+        {
+            throw new ApiException(
+                503,
+                "invalid_model_input",
+                $"Модель должна принимать float32 [1,3,{options.InputSize},{options.InputSize}]");
+        }
+
+        var outputName = activeSession.OutputNames[0];
+        var output = activeSession.OutputMetadata[outputName];
+        var expectedOutput = new[] { 1, 1, options.InputSize, options.InputSize };
+        if (!output.IsTensor
+            || output.ElementDataType != TensorElementType.Float
+            || !output.Dimensions.SequenceEqual(expectedOutput))
+        {
+            throw new ApiException(
+                503,
+                "invalid_model_output",
+                $"Модель должна возвращать float32 [1,1,{options.InputSize},{options.InputSize}]");
+        }
+    }
+
     private async Task EnsureModelAsync(CancellationToken cancellationToken)
     {
         if (File.Exists(options.ModelPath))
@@ -252,12 +285,12 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
                 await response.Content.CopyToAsync(target, cancellationToken);
             }
 
-            if (!string.IsNullOrWhiteSpace(options.ModelMd5))
+            if (!string.IsNullOrWhiteSpace(options.ModelSha256))
             {
                 await using var modelStream = File.OpenRead(temporaryPath);
-                var actual = Convert.ToHexString(await MD5.HashDataAsync(modelStream, cancellationToken))
+                var actual = Convert.ToHexString(await SHA256.HashDataAsync(modelStream, cancellationToken))
                     .ToLowerInvariant();
-                if (!string.Equals(actual, options.ModelMd5, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(actual, options.ModelSha256, StringComparison.OrdinalIgnoreCase))
                 {
                     throw new ApiException(503, "model_checksum_failed", "Контрольная сумма модели не совпала");
                 }
@@ -316,7 +349,7 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
                 runOptions,
                 inputNames,
                 inputValues,
-                activeSession.OutputNames);
+                outputNames);
             var rawMask = outputs[0].GetTensorMutableDataAsSpan<float>();
             if (rawMask.Length < pixels)
             {

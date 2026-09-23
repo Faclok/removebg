@@ -65,13 +65,13 @@ public sealed class ApiTests
     }
 
     [Fact]
-    public void SixCpuAutoProfileUsesTwoThreeThreadWorkers()
+    public void SixCpuAutoProfileUsesOneSixThreadWorker()
     {
         var runtime = RemovalRuntimeSettings.Resolve(new RemovalOptions(), 6);
 
-        Assert.Equal(2, runtime.WorkerCount);
-        Assert.Equal(3, runtime.IntraOpThreads);
-        Assert.Equal(4, runtime.QueueCapacity);
+        Assert.Equal(1, runtime.WorkerCount);
+        Assert.Equal(6, runtime.IntraOpThreads);
+        Assert.Equal(2, runtime.QueueCapacity);
     }
 
     [Fact]

@@ -45,7 +45,7 @@ builder.Services.AddSingleton<IBackgroundRemovalService, BackgroundRemovalServic
 builder.Services.AddHostedService<BackgroundRemovalWarmupService>();
 builder.Services.AddHttpClient("model-download", client =>
 {
-    client.Timeout = TimeSpan.FromMinutes(10);
+    client.Timeout = TimeSpan.FromMinutes(30);
     client.DefaultRequestHeaders.UserAgent.ParseAdd("Udalifon-API/1.0");
 });
 builder.Services
@@ -125,7 +125,8 @@ app.MapGet("/health/ready", async (
         return Results.Ok(new
         {
             status = "ready",
-            model = "birefnet-general-lite",
+            model = "birefnet-general-512-fp16",
+            inputSize = removalConfiguration.InputSize,
             device = removal.Device,
             workers = runtime.WorkerCount,
             intraOpThreads = runtime.IntraOpThreads,

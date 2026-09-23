@@ -35,10 +35,11 @@ services:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       Database__ConnectionString: "Server=mysql;Port=3306;Database=${MYSQL_DATABASE:-removebg};User=${MYSQL_USER:-removebg};Password=${MYSQL_PASSWORD:?MYSQL_PASSWORD is required};SslMode=Preferred;AllowPublicKeyRetrieval=True"
       Accounts__StartingBalanceKopecks: ${Accounts__StartingBalanceKopecks:-100000}
-      Removal__ModelPath: /models/birefnet-general-lite.onnx
-      Removal__CpuWorkers: ${Removal__CpuWorkers:-2}
-      Removal__IntraOpThreads: ${Removal__IntraOpThreads:-3}
-      Removal__QueueCapacity: ${Removal__QueueCapacity:-4}
+      Removal__ModelPath: /models/birefnet-general-512-fp16.onnx
+      Removal__InputSize: ${Removal__InputSize:-512}
+      Removal__CpuWorkers: ${Removal__CpuWorkers:-1}
+      Removal__IntraOpThreads: ${Removal__IntraOpThreads:-6}
+      Removal__QueueCapacity: ${Removal__QueueCapacity:-2}
       Removal__QueueWaitSeconds: ${Removal__QueueWaitSeconds:-30}
       Removal__PngCompressionLevel: ${Removal__PngCompressionLevel:-1}
       Removal__MaxUploadBytes: ${Removal__MaxUploadBytes:-15728640}
@@ -54,7 +55,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 90s
+      # The official 512 model is about 897 MiB and is downloaded on first boot.
+      start_period: 20m
     deploy:
       resources:
         limits:

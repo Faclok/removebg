@@ -17,10 +17,10 @@ public sealed class AccountOptions
 public sealed class RemovalOptions
 {
     public const string SectionName = "Removal";
-    public string ModelPath { get; init; } = "models/birefnet-general-lite.onnx";
+    public string ModelPath { get; init; } = "models/birefnet-general-512-fp16.onnx";
     public string ModelUrl { get; init; } = string.Empty;
-    public string ModelMd5 { get; init; } = string.Empty;
-    public int InputSize { get; init; } = 1024;
+    public string ModelSha256 { get; init; } = string.Empty;
+    public int InputSize { get; init; } = 512;
     public long MaxUploadBytes { get; init; } = 15 * 1024 * 1024;
     public long MaxImagePixels { get; init; } = 40_000_000;
     public int CpuWorkers { get; init; }
@@ -45,7 +45,7 @@ public sealed record RemovalRuntimeSettings(
         processorCount = Math.Max(1, processorCount);
         var workers = options.CpuWorkers > 0
             ? options.CpuWorkers
-            : Math.Clamp((processorCount + 2) / 3, 1, 2);
+            : 1;
         var intraOpThreads = options.IntraOpThreads > 0
             ? options.IntraOpThreads
             : Math.Max(1, processorCount / workers);
