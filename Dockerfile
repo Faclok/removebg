@@ -1,32 +1,34 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.201-noble AS build
 WORKDIR /src
 ARG TARGETARCH=amd64
 
-COPY global.json RemoveBg.slnx ./
-COPY src/RemoveBg.Api/RemoveBg.Api.csproj src/RemoveBg.Api/
-RUN case "$TARGETARCH" in \
-        amd64) dotnet_arch=x64 ;; \
-        arm64) dotnet_arch=arm64 ;; \
-        *) echo "Unsupported Docker architecture: $TARGETARCH" >&2; exit 1 ;; \
-    esac \
-    && dotnet restore src/RemoveBg.Api/RemoveBg.Api.csproj \
-        --runtime "linux-$dotnet_arch"
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    NUGET_XMLDOC_MODE=skip
 
+COPY global.json ./
 COPY src/RemoveBg.Api src/RemoveBg.Api
-RUN case "$TARGETARCH" in \
+
+RUN set -eux; \
+    case "$TARGETARCH" in \
         amd64) dotnet_arch=x64 ;; \
         arm64) dotnet_arch=arm64 ;; \
         *) echo "Unsupported Docker architecture: $TARGETARCH" >&2; exit 1 ;; \
-    esac \
-    && dotnet publish src/RemoveBg.Api/RemoveBg.Api.csproj \
+    esac; \
+    dotnet --info; \
+    dotnet publish src/RemoveBg.Api/RemoveBg.Api.csproj \
         --configuration Release \
         --runtime "linux-$dotnet_arch" \
         --self-contained false \
         --output /app/publish \
-        --no-restore \
-        -p:UseAppHost=false
+        --force \
+        --disable-build-servers \
+        --verbosity normal \
+        -p:UseAppHost=false \
+        -p:RestoreDisableParallel=true \
+        -m:1
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.5-noble AS runtime
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
