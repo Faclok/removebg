@@ -15,11 +15,15 @@ namespace RemoveBg.Api.Tests;
 public sealed class ApiFactory : WebApplicationFactory<Program>
 {
     private readonly bool failProcessing;
+    private readonly IBackgroundRemovalService? removalService;
     private readonly string databasePath;
 
-    public ApiFactory(bool failProcessing = false)
+    public ApiFactory(
+        bool failProcessing = false,
+        IBackgroundRemovalService? removalService = null)
     {
         this.failProcessing = failProcessing;
+        this.removalService = removalService;
         var testDirectory = Path.Combine(AppContext.BaseDirectory, "test-data");
         Directory.CreateDirectory(testDirectory);
         databasePath = Path.Combine(testDirectory, $"removebg-tests-{Guid.NewGuid():N}.db");
@@ -46,7 +50,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                     sqlite => sqlite.ExecutionStrategy(
                         dependencies => new TestRetryingExecutionStrategy(dependencies))));
             services.RemoveAll<IBackgroundRemovalService>();
-            services.AddSingleton<IBackgroundRemovalService>(new FakeRemovalService(failProcessing));
+            services.AddSingleton(
+                removalService ?? new FakeRemovalService(failProcessing));
         });
     }
 
@@ -70,10 +75,36 @@ internal sealed class TestRetryingExecutionStrategy(ExecutionStrategyDependencie
     protected override bool ShouldRetryOn(Exception exception) => false;
 }
 
+public sealed class BlockingRemovalService : IBackgroundRemovalService
+{
+    private static readonly byte[] Png = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public bool IsReady => true;
+    public Task Started => started.Task;
+
+    public Task WarmUpAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public async Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
+    {
+        started.TrySetResult();
+        await released.Task.WaitAsync(cancellationToken);
+        return new RemovalResult(Png, 1, 1, 1);
+    }
+
+    public void Release() => released.TrySetResult();
+}
+
 public sealed class FakeRemovalService(bool failProcessing) : IBackgroundRemovalService
 {
     private static readonly byte[] Png = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+    public bool IsReady => true;
+
+    public Task WarmUpAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
     {

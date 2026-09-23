@@ -42,6 +42,10 @@ public sealed class ApiExceptionMiddleware(RequestDelegate next, ILogger<ApiExce
 
         context.Response.Clear();
         context.Response.StatusCode = statusCode;
+        if (statusCode == StatusCodes.Status429TooManyRequests || code == "model_warming_up")
+        {
+            context.Response.Headers.RetryAfter = "5";
+        }
         await context.Response.WriteAsJsonAsync(
             new ErrorEnvelope(new ErrorBody(code, message, context.GetRequestId())));
     }

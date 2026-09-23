@@ -172,8 +172,9 @@ curl -sS http://localhost:8000/v1/remove-background \
 | `Removal__ModelPath` | `models/birefnet-general-lite.onnx` | локальный ONNX-файл |
 | `Removal__MaxUploadBytes` | `15728640` | максимум 15 MiB |
 | `Removal__MaxImagePixels` | `40000000` | предел количества пикселей |
-| `Removal__CpuWorkers` | `2` | параллельные инференсы |
+| `Removal__CpuWorkers` | `1` | параллельные инференсы; для 4 CPU безопаснее один |
 | `Removal__IntraOpThreads` | `4` | CPU-потоки одного инференса |
+| `Removal__QueueWaitSeconds` | `30` | ожидание свободного обработчика до ответа `429` |
 | `Admin__Token` | пусто | включает административное пополнение |
 
 ## Тарификация

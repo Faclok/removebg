@@ -1,4 +1,6 @@
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 using RemoveBg.Api.Configuration;
@@ -16,6 +18,35 @@ builder.Services.Configure<RemovalOptions>(builder.Configuration.GetSection(Remo
 builder.Services.Configure<PricingOptions>(builder.Configuration.GetSection(PricingOptions.SectionName));
 builder.Services.Configure<AdminOptions>(builder.Configuration.GetSection(AdminOptions.SectionName));
 
+var removalConfiguration = builder.Configuration
+    .GetSection(RemovalOptions.SectionName)
+    .Get<RemovalOptions>() ?? new RemovalOptions();
+builder.Services.AddRateLimiter(rateLimiter =>
+{
+    rateLimiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    rateLimiter.AddConcurrencyLimiter("image-processing", limiter =>
+    {
+        limiter.PermitLimit = Math.Max(1, removalConfiguration.CpuWorkers);
+        limiter.QueueLimit = 0;
+        limiter.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
+    rateLimiter.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.Headers.RetryAfter = "5";
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new
+            {
+                error = new
+                {
+                    code = "server_busy",
+                    message = "Сервер уже обрабатывает максимально допустимое число изображений",
+                    requestId = context.HttpContext.GetRequestId()
+                }
+            },
+            cancellationToken);
+    };
+});
+
 builder.Services.AddDbContext<AppDbContext>((services, options) =>
 {
     var configuration = services.GetRequiredService<IConfiguration>();
@@ -25,6 +56,7 @@ builder.Services.AddDbContext<AppDbContext>((services, options) =>
 });
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddSingleton<IBackgroundRemovalService, BackgroundRemovalService>();
+builder.Services.AddHostedService<BackgroundRemovalWarmupService>();
 builder.Services.AddHttpClient("model-download", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(10);
@@ -77,13 +109,23 @@ app.UseSwaggerUI(options =>
 });
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapGet("/health/live", () => Results.Ok(new { status = "ok" }))
     .WithTags("Health")
     .AllowAnonymous();
-app.MapGet("/health/ready", async (AppDbContext db, CancellationToken cancellationToken) =>
+app.MapGet("/health/ready", async (
+        AppDbContext db,
+        IBackgroundRemovalService removal,
+        CancellationToken cancellationToken) =>
     {
         await db.Database.ExecuteSqlRawAsync("SELECT 1", cancellationToken);
+        if (!removal.IsReady)
+        {
+            return Results.Json(
+                new { status = "warming_up", database = "ready", model = "loading", device = "cpu" },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
         return Results.Ok(new { status = "ready", model = "birefnet-general-lite", device = "cpu" });
     })
     .WithTags("Health")

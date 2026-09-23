@@ -47,8 +47,10 @@ public static class ApiEndpoints
             .Produces<ErrorEnvelope>(413)
             .Produces<ErrorEnvelope>(415)
             .Produces<ErrorEnvelope>(422)
+            .Produces<ErrorEnvelope>(429)
             .Produces<ErrorEnvelope>(503)
-            .DisableAntiforgery();
+            .DisableAntiforgery()
+            .RequireRateLimiting("image-processing");
         authorized.MapGet("/usage", GetUsageAsync)
             .WithName("GetUsage")
             .WithSummary("Получить статистику и журнал обработок")

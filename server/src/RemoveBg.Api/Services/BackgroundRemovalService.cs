@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
@@ -10,6 +11,8 @@ namespace RemoveBg.Api.Services;
 
 public interface IBackgroundRemovalService
 {
+    bool IsReady { get; }
+    Task WarmUpAsync(CancellationToken cancellationToken);
     Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken);
 }
 
@@ -25,7 +28,9 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
     private readonly ILogger<BackgroundRemovalService> logger;
     private readonly SemaphoreSlim workers;
     private readonly SemaphoreSlim initializationLock = new(1, 1);
-    private InferenceSession? session;
+    private volatile InferenceSession? session;
+
+    public bool IsReady => session is not null;
 
     public BackgroundRemovalService(
         IOptions<RemovalOptions> options,
@@ -35,17 +40,41 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         this.options = options.Value;
         this.httpClientFactory = httpClientFactory;
         this.logger = logger;
-        workers = new SemaphoreSlim(this.options.CpuWorkers, this.options.CpuWorkers);
+        var workerCount = Math.Max(1, this.options.CpuWorkers);
+        workers = new SemaphoreSlim(workerCount, workerCount);
     }
+
+    public async Task WarmUpAsync(CancellationToken cancellationToken) =>
+        _ = await GetSessionAsync(cancellationToken);
 
     public async Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
     {
-        ValidateImage(input);
-        await workers.WaitAsync(cancellationToken);
+        var imageInfo = ValidateImage(input);
+        if (!IsReady)
+        {
+            throw new ApiException(
+                StatusCodes.Status503ServiceUnavailable,
+                "model_warming_up",
+                "Модель запускается, повторите запрос через несколько секунд");
+        }
+
+        var entered = await workers.WaitAsync(
+            TimeSpan.FromSeconds(Math.Max(0, options.QueueWaitSeconds)),
+            cancellationToken);
+        if (!entered)
+        {
+            throw new ApiException(
+                StatusCodes.Status429TooManyRequests,
+                "server_busy",
+                "Очередь обработки занята, повторите запрос позже");
+        }
+
         try
         {
             var activeSession = await GetSessionAsync(cancellationToken);
-            return await Task.Run(() => RunInference(input, activeSession), cancellationToken);
+            return await Task.Run(
+                () => RunInference(input, imageInfo, activeSession),
+                cancellationToken);
         }
         finally
         {
@@ -53,7 +82,7 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         }
     }
 
-    private void ValidateImage(byte[] input)
+    private SKImageInfo ValidateImage(byte[] input)
     {
         using var stream = new SKMemoryStream(input);
         using var codec = SKCodec.Create(stream);
@@ -68,6 +97,7 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
                 "image_too_large",
                 $"Допустимо не более {options.MaxImagePixels} пикселей");
         }
+        return codec.Info;
     }
 
     private async Task<InferenceSession> GetSessionAsync(CancellationToken cancellationToken)
@@ -154,10 +184,18 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         }
     }
 
-    private RemovalResult RunInference(byte[] input, InferenceSession activeSession)
+    private RemovalResult RunInference(
+        byte[] input,
+        SKImageInfo sourceInfo,
+        InferenceSession activeSession)
     {
         var stopwatch = Stopwatch.StartNew();
-        using var original = SKBitmap.Decode(input)
+        var decodedInfo = new SKImageInfo(
+            sourceInfo.Width,
+            sourceInfo.Height,
+            SKColorType.Rgba8888,
+            SKAlphaType.Unpremul);
+        using var original = SKBitmap.Decode(input, decodedInfo)
             ?? throw new ApiException(422, "invalid_image", "Не удалось декодировать изображение");
         using var resized = new SKBitmap(new SKImageInfo(
             options.InputSize,
@@ -174,95 +212,112 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         }
 
         var pixels = options.InputSize * options.InputSize;
-        var tensor = new float[pixels * 3];
-        for (var y = 0; y < options.InputSize; y++)
+        var tensorLength = pixels * 3;
+        var tensor = ArrayPool<float>.Shared.Rent(tensorLength);
+        try
         {
-            for (var x = 0; x < options.InputSize; x++)
+            FillInputTensor(resized, tensor, pixels);
+            using var inputValue = OrtValue.CreateTensorValueFromMemory<float>(
+                tensor,
+                [1, 3, options.InputSize, options.InputSize]);
+            using var runOptions = new RunOptions();
+            var inputNames = new[] { activeSession.InputNames[0] };
+            var inputValues = new[] { inputValue };
+            using var outputs = activeSession.Run(
+                runOptions,
+                inputNames,
+                inputValues,
+                activeSession.OutputNames);
+            var rawMask = outputs[0].GetTensorMutableDataAsSpan<float>();
+            if (rawMask.Length < pixels)
             {
-                var color = resized.GetPixel(x, y);
-                var index = y * options.InputSize + x;
-                tensor[index] = (color.Red / 255f - Mean[0]) / Std[0];
-                tensor[pixels + index] = (color.Green / 255f - Mean[1]) / Std[1];
-                tensor[2 * pixels + index] = (color.Blue / 255f - Mean[2]) / Std[2];
+                throw new ApiException(503, "invalid_model_output", "Модель вернула некорректную маску");
+            }
+
+            NormalizeMaskInPlace(rawMask[..pixels]);
+            ApplyMask(original, rawMask[..pixels], options.InputSize);
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(tensor);
+        }
+
+        using var output = new MemoryStream();
+        if (!original.Encode(output, SKEncodedImageFormat.Png, 100))
+        {
+            throw new ApiException(503, "encoding_failed", "Не удалось закодировать результат");
+        }
+        stopwatch.Stop();
+        return new RemovalResult(
+            output.ToArray(),
+            original.Width,
+            original.Height,
+            stopwatch.ElapsedMilliseconds);
+    }
+
+    private void FillInputTensor(SKBitmap bitmap, float[] tensor, int pixels)
+    {
+        var source = bitmap.GetPixelSpan();
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            var row = y * bitmap.RowBytes;
+            var pixelRow = y * bitmap.Width;
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var sourceIndex = row + x * 4;
+                var targetIndex = pixelRow + x;
+                tensor[targetIndex] = (source[sourceIndex] / 255f - Mean[0]) / Std[0];
+                tensor[pixels + targetIndex] = (source[sourceIndex + 1] / 255f - Mean[1]) / Std[1];
+                tensor[2 * pixels + targetIndex] = (source[sourceIndex + 2] / 255f - Mean[2]) / Std[2];
             }
         }
+    }
 
-        using var inputValue = OrtValue.CreateTensorValueFromMemory(
-            tensor,
-            [1, 3, options.InputSize, options.InputSize]);
-        using var runOptions = new RunOptions();
-        var inputNames = new[] { activeSession.InputNames[0] };
-        var inputValues = new[] { inputValue };
-        using var outputs = activeSession.Run(
-            runOptions,
-            inputNames,
-            inputValues,
-            activeSession.OutputNames);
-        var rawMask = outputs[0].GetTensorDataAsSpan<float>();
-        if (rawMask.Length < pixels)
-        {
-            throw new ApiException(503, "invalid_model_output", "Модель вернула некорректную маску");
-        }
-
-        var normalized = new float[pixels];
+    internal static void NormalizeMaskInPlace(Span<float> mask)
+    {
         var min = float.MaxValue;
         var max = float.MinValue;
-        for (var i = 0; i < pixels; i++)
+        for (var i = 0; i < mask.Length; i++)
         {
-            var value = Sigmoid(rawMask[i]);
-            normalized[i] = value;
+            var value = Sigmoid(mask[i]);
+            mask[i] = value;
             min = Math.Min(min, value);
             max = Math.Max(max, value);
         }
 
         var range = Math.Max(max - min, float.Epsilon);
-        var mask = new byte[pixels];
-        for (var i = 0; i < pixels; i++)
+        for (var i = 0; i < mask.Length; i++)
         {
-            mask[i] = (byte)Math.Clamp((normalized[i] - min) / range * 255f, 0, 255);
+            mask[i] = Math.Clamp((mask[i] - min) / range, 0f, 1f);
         }
+    }
 
-        using var outputBitmap = new SKBitmap(new SKImageInfo(
-            original.Width,
-            original.Height,
-            SKColorType.Rgba8888,
-            SKAlphaType.Unpremul));
-        for (var y = 0; y < original.Height; y++)
+    internal static void ApplyMask(SKBitmap original, ReadOnlySpan<float> mask, int sourceSize)
+    {
+        using var maskBitmap = new SKBitmap(new SKImageInfo(
+            sourceSize,
+            sourceSize,
+            SKColorType.Alpha8,
+            SKAlphaType.Premul));
+        var maskPixels = maskBitmap.GetPixelSpan();
+        for (var y = 0; y < sourceSize; y++)
         {
-            for (var x = 0; x < original.Width; x++)
+            var sourceRow = y * sourceSize;
+            var targetRow = y * maskBitmap.RowBytes;
+            for (var x = 0; x < sourceSize; x++)
             {
-                var color = original.GetPixel(x, y);
-                var alpha = SampleMask(mask, x, y, original.Width, original.Height, options.InputSize);
-                var combinedAlpha = (byte)(color.Alpha * alpha / 255);
-                outputBitmap.SetPixel(x, y, new SKColor(color.Red, color.Green, color.Blue, combinedAlpha));
+                maskPixels[targetRow + x] = (byte)MathF.Round(mask[sourceRow + x] * 255f);
             }
         }
 
-        using var outputImage = SKImage.FromBitmap(outputBitmap);
-        using var outputData = outputImage.Encode(SKEncodedImageFormat.Png, 100);
-        stopwatch.Stop();
-        return new RemovalResult(outputData.ToArray(), original.Width, original.Height, stopwatch.ElapsedMilliseconds);
-    }
-
-    private static byte SampleMask(
-        byte[] mask,
-        int x,
-        int y,
-        int targetWidth,
-        int targetHeight,
-        int sourceSize)
-    {
-        var sourceX = (x + 0.5f) * sourceSize / targetWidth - 0.5f;
-        var sourceY = (y + 0.5f) * sourceSize / targetHeight - 0.5f;
-        var x0 = Math.Clamp((int)MathF.Floor(sourceX), 0, sourceSize - 1);
-        var y0 = Math.Clamp((int)MathF.Floor(sourceY), 0, sourceSize - 1);
-        var x1 = Math.Min(x0 + 1, sourceSize - 1);
-        var y1 = Math.Min(y0 + 1, sourceSize - 1);
-        var dx = Math.Clamp(sourceX - x0, 0, 1);
-        var dy = Math.Clamp(sourceY - y0, 0, 1);
-        var top = mask[y0 * sourceSize + x0] * (1 - dx) + mask[y0 * sourceSize + x1] * dx;
-        var bottom = mask[y1 * sourceSize + x0] * (1 - dx) + mask[y1 * sourceSize + x1] * dx;
-        return (byte)Math.Clamp(top * (1 - dy) + bottom * dy, 0, 255);
+        using var paint = new SKPaint { BlendMode = SKBlendMode.DstIn };
+        using var canvas = new SKCanvas(original);
+        canvas.DrawBitmap(
+            maskBitmap,
+            new SKRect(0, 0, original.Width, original.Height),
+            new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None),
+            paint);
+        canvas.Flush();
     }
 
     private static float Sigmoid(float value)
@@ -280,5 +335,30 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         session?.Dispose();
         workers.Dispose();
         initializationLock.Dispose();
+    }
+}
+
+public sealed class BackgroundRemovalWarmupService(
+    IBackgroundRemovalService removal,
+    ILogger<BackgroundRemovalWarmupService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested && !removal.IsReady)
+        {
+            try
+            {
+                await removal.WarmUpAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Failed to warm up background removal model; retrying");
+                await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
+            }
+        }
     }
 }

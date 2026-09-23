@@ -22,8 +22,9 @@ public sealed class RemovalOptions
     public int InputSize { get; init; } = 1024;
     public long MaxUploadBytes { get; init; } = 15 * 1024 * 1024;
     public long MaxImagePixels { get; init; } = 40_000_000;
-    public int CpuWorkers { get; init; } = 2;
+    public int CpuWorkers { get; init; } = 1;
     public int IntraOpThreads { get; init; } = 4;
+    public int QueueWaitSeconds { get; init; } = 30;
 }
 
 public sealed class PricingOptions

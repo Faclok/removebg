@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.ML.OnnxRuntime;
+using RemoveBg.Api.Services;
 using SkiaSharp;
 using Xunit;
 
@@ -12,10 +14,53 @@ public sealed class ApiTests
     [Fact]
     public void SkiaSharpDecodesPngOnCurrentPlatform()
     {
-        using var bitmap = SKBitmap.Decode(SamplePng());
+        using var bitmap = SKBitmap.Decode(
+            SamplePng(),
+            new SKImageInfo(1, 1, SKColorType.Rgba8888, SKAlphaType.Unpremul));
         Assert.NotNull(bitmap);
         Assert.Equal(1, bitmap.Width);
         Assert.Equal(1, bitmap.Height);
+    }
+
+    [Fact]
+    public void NativeMaskCompositeAppliesAlphaWithoutChangingOpaqueColor()
+    {
+        using var bitmap = new SKBitmap(new SKImageInfo(
+            2,
+            1,
+            SKColorType.Rgba8888,
+            SKAlphaType.Unpremul));
+        bitmap.SetPixel(0, 0, SKColors.Red);
+        bitmap.SetPixel(1, 0, SKColors.Blue);
+
+        BackgroundRemovalService.ApplyMask(bitmap, [1f, 0.5f, 1f, 0.5f], 2);
+
+        var opaque = bitmap.GetPixel(0, 0);
+        var translucent = bitmap.GetPixel(1, 0);
+        Assert.Equal(SKColors.Red, opaque);
+        Assert.Equal(SKColors.Blue.Red, translucent.Red);
+        Assert.Equal(SKColors.Blue.Green, translucent.Green);
+        Assert.Equal(SKColors.Blue.Blue, translucent.Blue);
+        Assert.InRange(translucent.Alpha, 127, 128);
+    }
+
+    [Fact]
+    public void MaskNormalizationSpansFullOpacityRange()
+    {
+        var values = new[] { -4f, 0f, 4f };
+
+        BackgroundRemovalService.NormalizeMaskInPlace(values);
+
+        Assert.Equal(0f, values[0]);
+        Assert.InRange(values[1], 0.49f, 0.51f);
+        Assert.Equal(1f, values[2]);
+    }
+
+    [Fact]
+    public void OnnxTensorAcceptsAnOversizedPooledBuffer()
+    {
+        using var value = OrtValue.CreateTensorValueFromMemory<float>(new float[8], [1, 3]);
+        Assert.NotNull(value);
     }
 
     [Fact]
@@ -73,6 +118,33 @@ public sealed class ApiTests
         var usage = await client.GetFromJsonAsync<UsageDto>("/v1/usage");
         Assert.Equal(0, usage!.Successful);
         Assert.Equal(0m, usage.ChargedRub);
+    }
+
+    [Fact]
+    public async Task ConcurrentRemovalIsRejectedBeforeItCanOverloadTheWorker()
+    {
+        var removal = new BlockingRemovalService();
+        using var factory = new ApiFactory(removalService: removal);
+        using var client = factory.CreateClient();
+        var account = await RegisterAsync(client, "concurrency@example.ru");
+        client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
+
+        using var firstForm = ImageForm();
+        var firstRequest = client.PostAsync("/v1/remove-background", firstForm);
+        await removal.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var secondForm = ImageForm();
+        var rejected = await client.PostAsync("/v1/remove-background", secondForm);
+        removal.Release();
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
+        Assert.Equal("5", rejected.Headers.RetryAfter?.Delta?.TotalSeconds.ToString("0")
+            ?? rejected.Headers.GetValues("Retry-After").Single());
+        var error = await rejected.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("server_busy", error.GetProperty("error").GetProperty("code").GetString());
+
+        var completed = await firstRequest;
+        Assert.Equal(HttpStatusCode.OK, completed.StatusCode);
     }
 
     [Fact]
