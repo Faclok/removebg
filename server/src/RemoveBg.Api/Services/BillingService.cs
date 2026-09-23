@@ -77,49 +77,59 @@ public sealed class BillingService(
         long priceKopecks,
         CancellationToken cancellationToken)
     {
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var updated = await db.Accounts
-            .Where(x => x.Id == accountId && x.BalanceKopecks >= priceKopecks)
-            .ExecuteUpdateAsync(
-                setters => setters.SetProperty(
-                    x => x.BalanceKopecks,
-                    x => x.BalanceKopecks - priceKopecks),
-                cancellationToken);
-        if (updated != 1)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            throw new ApiException(402, "insufficient_funds", "Недостаточно средств на балансе");
-        }
+        var strategy = db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteInTransactionAsync(
+            async operationCancellationToken =>
+            {
+                // A retry may reuse this scoped DbContext. Remove entities left
+                // in the change tracker by an interrupted previous attempt.
+                db.ChangeTracker.Clear();
 
-        var balanceAfter = await db.Accounts
-            .Where(x => x.Id == accountId)
-            .Select(x => x.BalanceKopecks)
-            .SingleAsync(cancellationToken);
-        var usage = new UsageRecord
-        {
-            RequestId = requestId,
-            AccountId = accountId,
-            ApiKeyId = apiKeyId,
-            Status = "success",
-            Filename = filename,
-            InputBytes = inputBytes,
-            OutputBytes = outputBytes,
-            PriceKopecks = priceKopecks,
-            DurationMs = durationMs
-        };
-        db.UsageRecords.Add(usage);
-        db.LedgerEntries.Add(new LedgerEntry
-        {
-            AccountId = accountId,
-            AmountKopecks = -priceKopecks,
-            BalanceAfterKopecks = balanceAfter,
-            Kind = "usage",
-            Description = "Успешное удаление фона",
-            UsageId = usage.Id
-        });
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return balanceAfter;
+                var updated = await db.Accounts
+                    .Where(x => x.Id == accountId && x.BalanceKopecks >= priceKopecks)
+                    .ExecuteUpdateAsync(
+                        setters => setters.SetProperty(
+                            x => x.BalanceKopecks,
+                            x => x.BalanceKopecks - priceKopecks),
+                        operationCancellationToken);
+                if (updated != 1)
+                {
+                    throw new ApiException(402, "insufficient_funds", "Недостаточно средств на балансе");
+                }
+
+                var balanceAfter = await db.Accounts
+                    .Where(x => x.Id == accountId)
+                    .Select(x => x.BalanceKopecks)
+                    .SingleAsync(operationCancellationToken);
+                var usage = new UsageRecord
+                {
+                    RequestId = requestId,
+                    AccountId = accountId,
+                    ApiKeyId = apiKeyId,
+                    Status = "success",
+                    Filename = filename,
+                    InputBytes = inputBytes,
+                    OutputBytes = outputBytes,
+                    PriceKopecks = priceKopecks,
+                    DurationMs = durationMs
+                };
+                db.UsageRecords.Add(usage);
+                db.LedgerEntries.Add(new LedgerEntry
+                {
+                    AccountId = accountId,
+                    AmountKopecks = -priceKopecks,
+                    BalanceAfterKopecks = balanceAfter,
+                    Kind = "usage",
+                    Description = "Успешное удаление фона",
+                    UsageId = usage.Id
+                });
+                await db.SaveChangesAsync(operationCancellationToken);
+                return balanceAfter;
+            },
+            operationCancellationToken => db.UsageRecords
+                .AsNoTracking()
+                .AnyAsync(x => x.RequestId == requestId, operationCancellationToken),
+            cancellationToken);
     }
 
     public static decimal Rubles(long kopecks) => kopecks / 100m;

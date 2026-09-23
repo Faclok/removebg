@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -40,7 +41,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IDbContextOptionsConfiguration<AppDbContext>>();
             services.RemoveAll<DbContextOptions<AppDbContext>>();
             services.AddDbContext<AppDbContext>(options =>
-                options.UseSqlite($"Data Source={databasePath};Pooling=False"));
+                options.UseSqlite(
+                    $"Data Source={databasePath};Pooling=False",
+                    sqlite => sqlite.ExecutionStrategy(
+                        dependencies => new TestRetryingExecutionStrategy(dependencies))));
             services.RemoveAll<IBackgroundRemovalService>();
             services.AddSingleton<IBackgroundRemovalService>(new FakeRemovalService(failProcessing));
         });
@@ -58,6 +62,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             }
         }
     }
+}
+
+internal sealed class TestRetryingExecutionStrategy(ExecutionStrategyDependencies dependencies)
+    : ExecutionStrategy(dependencies, 1, TimeSpan.Zero)
+{
+    protected override bool ShouldRetryOn(Exception exception) => false;
 }
 
 public sealed class FakeRemovalService(bool failProcessing) : IBackgroundRemovalService
