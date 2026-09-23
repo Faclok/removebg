@@ -7,10 +7,10 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
     proxy: {
-      '/v1': 'http://localhost:5000',
-      '/health': 'http://localhost:5000',
-      '/docs': 'http://localhost:5000',
-      '/swagger': 'http://localhost:5000',
+      '/v1': 'http://127.0.0.1:5000',
+      '/health': 'http://127.0.0.1:5000',
+      '/docs': 'http://127.0.0.1:5000',
+      '/swagger': 'http://127.0.0.1:5000',
     },
   },
 });

@@ -15,7 +15,10 @@ services:
     volumes:
       - removebg-mysql:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      # mysqladmin ping only checks whether the server accepts connections.
+      # Authentication is deliberately omitted so passwords with shell-special
+      # characters cannot break the probe before the application is started.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
       interval: 10s
       timeout: 5s
       retries: 10

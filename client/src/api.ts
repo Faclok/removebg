@@ -50,6 +50,13 @@ export type ApiKeyView = {
 
 export type ApiKeyCreated = ApiKeyView & { apiKey: string };
 
+export type Health = {
+  status: string;
+  database?: string;
+  model?: string;
+  device?: string;
+};
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -95,8 +102,10 @@ export const api = {
     }),
 
   balance: (apiKey: string) => json<Balance>('/v1/balance', {}, apiKey),
-  usage: (apiKey: string) => json<Usage>('/v1/usage?limit=50', {}, apiKey),
+  usage: (apiKey: string, limit = 50, offset = 0) =>
+    json<Usage>(`/v1/usage?limit=${limit}&offset=${offset}`, {}, apiKey),
   keys: (apiKey: string) => json<ApiKeyView[]>('/v1/api-keys', {}, apiKey),
+  health: () => json<Health>('/health/ready'),
 
   createKey: (apiKey: string, name: string) =>
     json<ApiKeyCreated>(

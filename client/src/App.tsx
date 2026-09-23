@@ -1,705 +1,135 @@
 import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type DragEvent,
-  type ReactNode,
+  useCallback, useEffect, useMemo, useRef, useState,
+  type ChangeEvent, type DragEvent, type FormEvent, type ReactNode,
 } from 'react';
-import {
-  api,
-  ApiError,
-  type ApiKeyCreated,
-  type ApiKeyView,
-  type Balance,
-  type Usage,
-} from './api';
+import { api, ApiError, type ApiKeyCreated, type ApiKeyView, type Balance, type Health, type Usage, type UsageItem } from './api';
 
 const STORAGE_KEY = 'udalifon_api_key';
+const MAX_FILE_SIZE = 15 * 1024 * 1024;
+const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+type Page = 'overview' | 'processing' | 'history' | 'keys' | 'billing' | 'admin' | 'settings';
+type Toast = { id: number; kind: 'success' | 'error' | 'info'; text: string };
+type QueueStatus = 'queued' | 'processing' | 'done' | 'error';
+type QueueItem = { id: string; file: File; previewUrl: string; resultUrl?: string; status: QueueStatus; error?: string; chargedRub?: number; balanceRub?: number };
 
-type LooseStyle = CSSProperties & Record<string, string | number | undefined>;
-type StyleValue = any;
+const nav: Array<{ page: Page; label: string; icon: string }> = [
+  { page: 'overview', label: 'Обзор', icon: '⌂' }, { page: 'processing', label: 'Обработка', icon: '✦' },
+  { page: 'history', label: 'История', icon: '≡' }, { page: 'keys', label: 'API-ключи', icon: '⌘' },
+  { page: 'billing', label: 'Тарифы', icon: '₽' }, { page: 'admin', label: 'Администрирование', icon: '⚙' },
+  { page: 'settings', label: 'Настройки', icon: '◌' },
+];
 
-function flattenStyle(style: StyleValue | StyleValue[] | ((state: { pressed: boolean }) => StyleValue | StyleValue[]), pressed = false) {
-  const resolved = typeof style === 'function' ? style({ pressed }) : style;
-  const flat = (Array.isArray(resolved) ? Object.assign({}, ...resolved.filter(Boolean)) : resolved || {}) as LooseStyle;
-  const normalized: LooseStyle = { ...flat };
-  if (flat.marginHorizontal !== undefined) {
-    normalized.marginLeft = flat.marginHorizontal;
-    normalized.marginRight = flat.marginHorizontal;
-    delete normalized.marginHorizontal;
-  }
-  if (flat.marginVertical !== undefined) {
-    normalized.marginTop = flat.marginVertical;
-    normalized.marginBottom = flat.marginVertical;
-    delete normalized.marginVertical;
-  }
-  if (flat.paddingHorizontal !== undefined) {
-    normalized.paddingLeft = flat.paddingHorizontal;
-    normalized.paddingRight = flat.paddingHorizontal;
-    delete normalized.paddingHorizontal;
-  }
-  if (flat.paddingVertical !== undefined) {
-    normalized.paddingTop = flat.paddingVertical;
-    normalized.paddingBottom = flat.paddingVertical;
-    delete normalized.paddingVertical;
-  }
-  if (flat.borderWidth !== undefined && !flat.borderStyle) normalized.borderStyle = 'solid';
-  if (flat.borderTopWidth !== undefined && !flat.borderTopStyle) normalized.borderTopStyle = 'solid';
-  if (typeof flat.lineHeight === 'number') normalized.lineHeight = `${flat.lineHeight}px`;
-  return normalized as CSSProperties;
-}
-
-function View({ children, style, ...props }: { children?: ReactNode; style?: StyleValue } & Omit<React.HTMLAttributes<HTMLDivElement>, 'style'>) {
-  return <div style={{ display: 'flex', flexDirection: 'column', ...flattenStyle(style) }} {...props}>{children}</div>;
-}
-
-function Text({ children, style, numberOfLines, ...props }: { children?: ReactNode; style?: StyleValue; numberOfLines?: number } & Omit<React.HTMLAttributes<HTMLSpanElement>, 'style'>) {
-  const clipped = numberOfLines ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as CSSProperties : undefined;
-  return <span style={{ ...flattenStyle(style), ...clipped }} {...props}>{children}</span>;
-}
-
-function Pressable({ children, style, onPress, disabled, ...props }: {
-  children?: ReactNode;
-  style?: StyleValue | StyleValue[] | ((state: { pressed: boolean }) => StyleValue | StyleValue[]);
-  onPress?: () => void;
-  disabled?: boolean;
-} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'style' | 'onClick'>) {
-  const [pressed, setPressed] = useState(false);
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onPress}
-      onPointerDown={() => setPressed(true)}
-      onPointerUp={() => setPressed(false)}
-      onPointerLeave={() => setPressed(false)}
-      style={{ display: 'flex', flexDirection: 'column', ...flattenStyle(style, pressed) }}
-      {...props}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ScrollView({ children, style }: { children?: ReactNode; style?: StyleValue | StyleValue[] }) {
-  return <div style={{ ...flattenStyle(style), overflowY: 'auto' }}>{children}</div>;
-}
-
-function ActivityIndicator({ size = 'small' }: { color?: string; size?: 'small' | 'large' }) {
-  return <span className={`spinner spinner-${size}`} aria-label="Загрузка" />;
-}
-
-const StyleSheet = { create: <T extends Record<string, LooseStyle>>(styles: T) => styles };
-
-function money(value: number) {
-  return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB' }).format(value);
-}
-
-function date(value: string | null) {
+function money(value: number) { return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', minimumFractionDigits: 2 }).format(value); }
+function compactNumber(value: number) { return new Intl.NumberFormat('ru-RU', { notation: value >= 10_000 ? 'compact' : 'standard' }).format(value); }
+function date(value: string | null, full = true) {
   if (!value) return '—';
-  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short' }).format(
-    new Date(value),
-  );
+  return new Intl.DateTimeFormat('ru-RU', full ? { dateStyle: 'medium', timeStyle: 'short' } : { day: '2-digit', month: 'short' }).format(new Date(value));
 }
-
-function bytes(value: number) {
-  if (value < 1024) return `${value} Б`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} КБ`;
-  return `${(value / 1024 / 1024).toFixed(1)} МБ`;
-}
-
-function messageOf(error: unknown) {
-  if (error instanceof ApiError) {
-    return `${error.message}${error.requestId ? ` · запрос ${error.requestId}` : ''}`;
-  }
+function bytes(value: number) { if (value < 1024) return `${value} Б`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} КБ`; return `${(value / 1024 / 1024).toFixed(1)} МБ`; }
+function duration(value: number) { return value < 1000 ? `${value} мс` : `${(value / 1000).toFixed(1)} с`; }
+function errorMessage(error: unknown) {
+  if (error instanceof ApiError) return `${error.message}${error.requestId ? ` · запрос ${error.requestId}` : ''}`;
   return error instanceof Error ? error.message : 'Неизвестная ошибка';
 }
+function pageFromHash(): Page { const value = window.location.hash.replace('#/', '') as Page; return nav.some((item) => item.page === value) ? value : 'overview'; }
+async function copyText(text: string) { await navigator.clipboard.writeText(text); }
 
-function Button({
-  children,
-  onPress,
-  disabled = false,
-  secondary = false,
-  danger = false,
-}: {
-  children: ReactNode;
-  onPress: () => void;
-  disabled?: boolean;
-  secondary?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <Pressable
-      aria-label={typeof children === 'string' ? children : undefined}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }: { pressed: boolean }) => [
-        styles.button,
-        secondary && styles.buttonSecondary,
-        danger && styles.buttonDanger,
-        (pressed || disabled) && styles.buttonMuted,
-      ]}
-    >
-      <Text style={[styles.buttonText, secondary && styles.buttonSecondaryText]}>{children}</Text>
-    </Pressable>
-  );
+function Button({ children, onClick, type = 'button', variant = 'primary', disabled, className = '' }: { children: ReactNode; onClick?: () => void; type?: 'button' | 'submit'; variant?: 'primary' | 'secondary' | 'danger' | 'ghost'; disabled?: boolean; className?: string }) {
+  return <button type={type} className={`button button-${variant} ${className}`} onClick={onClick} disabled={disabled}>{children}</button>;
+}
+function EmptyState({ icon, title, text, action }: { icon: string; title: string; text: string; action?: ReactNode }) {
+  return <div className="empty-state"><div className="empty-icon">{icon}</div><h3>{title}</h3><p>{text}</p>{action}</div>;
+}
+function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string; title: string; description: string; actions?: ReactNode }) {
+  return <header className="page-header"><div>{eyebrow && <span className="eyebrow">{eyebrow}</span>}<h1>{title}</h1><p>{description}</p></div>{actions && <div className="page-actions">{actions}</div>}</header>;
+}
+function StatusBadge({ status }: { status: string }) {
+  const success = status === 'success' || status === 'done' || status === 'ready'; const pending = status === 'processing' || status === 'queued';
+  const label: Record<string, string> = { success: 'Готово', done: 'Готово', ready: 'В сети', failed: 'Ошибка', error: 'Ошибка', processing: 'Обработка', queued: 'В очереди' };
+  return <span className={`status ${success ? 'status-success' : pending ? 'status-pending' : 'status-error'}`}><i />{label[status] ?? status}</span>;
 }
 
-function Field({
-  label,
-  value,
-  onChange,
-  type = 'text',
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  type?: string;
-  placeholder?: string;
-}) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <input
-        type={type}
-        value={value}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
-  );
+function AuthScreen({ onAuthorized }: { onAuthorized: (key: string) => void }) {
+  const [mode, setMode] = useState<'register' | 'login'>('register'); const [name, setName] = useState(''); const [email, setEmail] = useState('');
+  const [key, setKey] = useState(''); const [created, setCreated] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError('');
+    try { if (mode === 'register') setCreated((await api.register(name.trim(), email.trim())).apiKey); else { const normalized = key.trim(); await api.balance(normalized); onAuthorized(normalized); } }
+    catch (caught) { setError(errorMessage(caught)); } finally { setBusy(false); }
+  }
+  if (created) return <main className="auth-layout"><section className="auth-brand"><a className="brand brand-large" href="/"><span>У</span> Удалифон</a><div className="auth-copy"><span className="hero-pill">Аккаунт создан</span><h1>Сохраните ключ.<br /><em>Он показывается один раз.</em></h1><p>Стартовый баланс 1 000 ₽ уже начислен. Ключ даёт полный доступ к аккаунту.</p></div></section><section className="auth-panel"><div className="auth-card"><div className="success-mark">✓</div><h2>Всё готово</h2><p className="muted">Скопируйте ключ в менеджер секретов, затем откройте кабинет.</p><div className="secret-box"><code>{created}</code></div><Button variant="secondary" onClick={() => void copyText(created)}>Копировать ключ</Button><Button onClick={() => onAuthorized(created)}>Открыть кабинет →</Button></div></section></main>;
+  return <main className="auth-layout"><section className="auth-brand"><a className="brand brand-large" href="/"><span>У</span> Удалифон</a><div className="auth-copy"><span className="hero-pill">CPU-only · без GPU</span><h1>Удаляйте фон<br /><em>точно и в масштабе.</em></h1><p>Производственный API и рабочий кабинет для каталогов, маркетплейсов и контент-команд.</p><ul className="feature-list"><li><b>1 000 ₽</b> на старте</li><li>JPEG, PNG и WebP до 15 МБ</li><li>Оплата только успешных обработок</li></ul></div><div className="auth-foot">BiRefNet · ONNX Runtime · данные в вашем контуре</div></section><section className="auth-panel"><form className="auth-card" onSubmit={submit}><div className="auth-tabs"><button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => { setMode('register'); setError(''); }}>Регистрация</button><button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => { setMode('login'); setError(''); }}>Вход по ключу</button></div><h2>{mode === 'register' ? 'Создать аккаунт' : 'Войти в кабинет'}</h2><p className="muted">{mode === 'register' ? 'Без карты и пароля. Получите API-ключ сразу.' : 'Используйте любой активный ключ аккаунта.'}</p>{mode === 'register' ? <><label className="field"><span>Имя или компания</span><input required maxLength={200} value={name} onChange={(e) => setName(e.target.value)} placeholder="ООО Ромашка" autoComplete="name" /></label><label className="field"><span>Email</span><input required type="email" maxLength={320} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="hello@company.ru" autoComplete="email" /></label></> : <label className="field"><span>API-ключ</span><input required type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="rb_live_••••••••••••" autoComplete="current-password" /></label>}{error && <div className="alert alert-error">{error}</div>}<Button type="submit" disabled={busy}>{busy ? <><span className="spinner" /> Проверяем…</> : mode === 'register' ? 'Создать аккаунт' : 'Войти'}</Button><a className="text-link centered" href="/docs" target="_blank" rel="noreferrer">Документация API ↗</a></form></section></main>;
 }
 
-function Notice({ text, kind = 'error' }: { text: string; kind?: 'error' | 'success' }) {
-  return (
-    <View style={[styles.notice, kind === 'success' && styles.noticeSuccess]}>
-      <Text style={styles.noticeText}>{text}</Text>
-    </View>
-  );
+function Overview({ balance, usage, keys, health, go }: { balance: Balance; usage: Usage; keys: ApiKeyView[]; health: Health | null; go: (page: Page) => void }) {
+  const recent = usage.items.slice(0, 6); const avg = usage.items.length ? Math.round(usage.items.reduce((sum, item) => sum + item.durationMs, 0) / usage.items.length) : 0; const successRate = usage.total ? Math.round(usage.successful / usage.total * 100) : 100;
+  const chart = useMemo(() => { const result: Array<{ label: string; count: number }> = []; for (let offset = 6; offset >= 0; offset--) { const point = new Date(); point.setHours(0, 0, 0, 0); point.setDate(point.getDate() - offset); const next = new Date(point); next.setDate(next.getDate() + 1); result.push({ label: new Intl.DateTimeFormat('ru-RU', { weekday: 'short' }).format(point).replace('.', ''), count: usage.items.filter((item) => { const time = new Date(item.createdAt).getTime(); return item.status === 'success' && time >= point.getTime() && time < next.getTime(); }).length }); } return result; }, [usage.items]);
+  const max = Math.max(...chart.map((item) => item.count), 1);
+  return <><PageHeader eyebrow="Рабочая панель" title="Добро пожаловать" description="Контролируйте обработку, расходы и доступ к API в одном месте." actions={<Button onClick={() => go('processing')}>＋ Новая обработка</Button>} /><section className="stats-grid"><article className="stat-card accent-card"><span className="stat-label">Баланс</span><strong>{money(balance.balanceRub)}</strong><small>хватит примерно на {compactNumber(Math.floor(balance.balanceRub / Math.max(balance.nextImagePriceRub, .01)))} изображений</small></article><article className="stat-card"><span className="stat-label">В этом месяце</span><strong>{compactNumber(balance.successfulImagesThisMonth)}</strong><small>успешных обработок</small></article><article className="stat-card"><span className="stat-label">Текущая цена</span><strong>{money(balance.nextImagePriceRub)}</strong><small>за следующее изображение</small></article><article className="stat-card"><span className="stat-label">API-ключи</span><strong>{keys.filter((key) => !key.revokedAt).length}</strong><small>активных ключей</small></article></section><section className="dashboard-grid"><article className="panel chart-panel"><div className="panel-head"><div><span className="panel-kicker">Активность</span><h2>Последние 7 дней</h2></div><button className="text-link" onClick={() => go('history')}>Вся история →</button></div><div className="chart-summary"><strong>{usage.items.filter((item) => item.status === 'success').length}</strong><span>успешных в загруженной истории</span></div><div className="bar-chart" aria-label="Обработки за последние 7 дней">{chart.map((item) => <div className="bar-column" key={item.label}><div className="bar-track"><div className="bar-fill" style={{ height: `${Math.max(item.count ? 12 : 2, item.count / max * 100)}%` }}><span>{item.count || ''}</span></div></div><small>{item.label}</small></div>)}</div></article><article className="panel health-panel"><div className="panel-head"><div><span className="panel-kicker">Система</span><h2>Состояние сервиса</h2></div><StatusBadge status={health?.status ?? 'error'} /></div><dl className="metric-list"><div><dt>Модель</dt><dd>{health?.model ?? 'Недоступно'}</dd></div><div><dt>Устройство</dt><dd>{health?.device?.toUpperCase() ?? '—'}</dd></div><div><dt>Успешность</dt><dd>{successRate}%</dd></div><div><dt>Среднее время</dt><dd>{avg ? duration(avg) : '—'}</dd></div></dl><a className="button button-secondary full" href="/docs" target="_blank" rel="noreferrer">Открыть Swagger UI ↗</a></article></section><section className="panel recent-panel"><div className="panel-head"><div><span className="panel-kicker">Журнал</span><h2>Последние операции</h2></div><button className="text-link" onClick={() => go('history')}>Подробнее →</button></div>{recent.length ? <UsageTable items={recent} compact /> : <EmptyState icon="↗" title="История пока пуста" text="Обработайте первое изображение — операция появится здесь." action={<Button onClick={() => go('processing')}>Начать обработку</Button>} />}</section></>;
 }
 
-function Header({ authenticated, onLogout }: { authenticated: boolean; onLogout: () => void }) {
-  return (
-    <View style={styles.header}>
-      <View style={styles.brand}>
-        <View style={styles.logo}><Text style={styles.logoText}>У</Text></View>
-        <View>
-          <Text style={styles.brandName}>Удалифон</Text>
-          <Text style={styles.brandTag}>CPU background removal</Text>
-        </View>
-      </View>
-      <View style={styles.headerActions}>
-        <a className="nav-link" href="/docs" target="_blank" rel="noreferrer">Swagger API ↗</a>
-        {authenticated && <Button secondary onPress={onLogout}>Выйти</Button>}
-      </View>
-    </View>
-  );
+function Processor({ apiKey, balance, onProcessed, notify }: { apiKey: string; balance: Balance; onProcessed: () => Promise<void>; notify: (kind: Toast['kind'], text: string) => void }) {
+  const [items, setItems] = useState<QueueItem[]>([]); const [dragging, setDragging] = useState(false); const [running, setRunning] = useState(false); const fileInput = useRef<HTMLInputElement>(null); const itemsRef = useRef(items);
+  useEffect(() => { itemsRef.current = items; }, [items]); useEffect(() => () => { itemsRef.current.forEach((item) => { URL.revokeObjectURL(item.previewUrl); if (item.resultUrl) URL.revokeObjectURL(item.resultUrl); }); }, []);
+  const addFiles = useCallback((files: File[]) => { const valid: QueueItem[] = []; const errors: string[] = []; for (const file of files) { if (!ALLOWED_TYPES.has(file.type)) errors.push(`${file.name}: неподдерживаемый формат`); else if (file.size > MAX_FILE_SIZE) errors.push(`${file.name}: больше 15 МБ`); else if (!file.size) errors.push(`${file.name}: пустой файл`); else valid.push({ id: crypto.randomUUID(), file, previewUrl: URL.createObjectURL(file), status: 'queued' }); } const slots = Math.max(0, 100 - itemsRef.current.length); const accepted = valid.slice(0, slots); valid.slice(slots).forEach((item) => URL.revokeObjectURL(item.previewUrl)); if (accepted.length) setItems((current) => [...current, ...accepted]); if (valid.length > slots) errors.push('В очереди может быть не больше 100 файлов'); if (errors.length) notify('error', errors.slice(0, 2).join('; ')); }, [notify]);
+  function choose(event: ChangeEvent<HTMLInputElement>) { addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }
+  function drop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setDragging(false); addFiles(Array.from(event.dataTransfer.files)); }
+  function removeItem(id: string) { const item = itemsRef.current.find((entry) => entry.id === id); if (item) { URL.revokeObjectURL(item.previewUrl); if (item.resultUrl) URL.revokeObjectURL(item.resultUrl); } setItems((current) => current.filter((entry) => entry.id !== id)); }
+  async function processAll() { const queue = itemsRef.current.filter((item) => item.status === 'queued' || item.status === 'error'); if (!queue.length || running) return; setRunning(true); let successes = 0; for (const entry of queue) { setItems((current) => current.map((item) => item.id === entry.id ? { ...item, status: 'processing', error: undefined } : item)); try { const result = await api.removeBackground(apiKey, entry.file); const resultUrl = URL.createObjectURL(result.blob); setItems((current) => current.map((item) => item.id === entry.id ? { ...item, resultUrl, status: 'done', chargedRub: Number(result.chargedRub ?? balance.nextImagePriceRub), balanceRub: Number(result.balanceRub ?? balance.balanceRub) } : item)); successes++; } catch (caught) { setItems((current) => current.map((item) => item.id === entry.id ? { ...item, status: 'error', error: errorMessage(caught) } : item)); if (caught instanceof ApiError && (caught.status === 401 || caught.status === 402)) break; } } setRunning(false); if (successes) { await onProcessed(); notify('success', `Готово: ${successes} изображений`); } }
+  function download(item: QueueItem) { if (!item.resultUrl) return; const link = document.createElement('a'); link.href = item.resultUrl; link.download = `${item.file.name.replace(/\.[^.]+$/, '')}-no-bg.png`; link.click(); }
+  const pending = items.filter((item) => item.status === 'queued' || item.status === 'error').length; const completed = items.filter((item) => item.status === 'done').length; const spent = items.reduce((sum, item) => sum + (item.chargedRub ?? 0), 0);
+  return <><PageHeader eyebrow="Пакетный режим" title="Удаление фона" description="Добавьте до 100 изображений. Очередь обрабатывается последовательно и бережно расходует CPU." actions={<div className="balance-chip"><span>Баланс</span><strong>{money(balance.balanceRub)}</strong></div>} /><section className="processor-layout"><div className="processor-main"><div className={`dropzone ${dragging ? 'dragging' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop} onClick={() => fileInput.current?.click()} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInput.current?.click(); }}><input ref={fileInput} className="visually-hidden" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={choose} /><div className="drop-icon">⇧</div><h2>Перетащите изображения сюда</h2><p>или нажмите, чтобы выбрать файлы</p><div className="format-pills"><span>JPEG</span><span>PNG</span><span>WebP</span><span>до 15 МБ</span></div></div>{items.length > 0 && <section className="queue panel"><div className="panel-head queue-head"><div><span className="panel-kicker">Очередь</span><h2>{items.length} файлов</h2></div><div className="queue-actions"><button className="text-link" onClick={() => fileInput.current?.click()}>＋ Добавить</button><button className="text-link danger-link" disabled={running} onClick={() => items.filter((item) => item.status === 'done').forEach((item) => removeItem(item.id))}>Очистить готовые</button></div></div><div className="queue-list">{items.map((item) => <article className="queue-item" key={item.id}><div className="thumb checker"><img src={item.resultUrl ?? item.previewUrl} alt="" /></div><div className="queue-info"><strong title={item.file.name}>{item.file.name}</strong><span>{bytes(item.file.size)}{item.chargedRub !== undefined ? ` · ${money(item.chargedRub)}` : ''}</span>{item.error && <small className="inline-error">{item.error}</small>}</div><StatusBadge status={item.status} /><div className="item-actions">{item.status === 'done' && <button title="Скачать PNG" onClick={() => download(item)}>↓</button>}<button title="Удалить из очереди" disabled={item.status === 'processing'} onClick={() => removeItem(item.id)}>×</button></div></article>)}</div></section>}</div><aside className="processor-sidebar"><article className="panel sticky-panel"><span className="panel-kicker">Сводка</span><h2>Текущая очередь</h2><dl className="metric-list"><div><dt>Всего файлов</dt><dd>{items.length}</dd></div><div><dt>Готово</dt><dd>{completed}</dd></div><div><dt>Ожидают / ошибки</dt><dd>{pending}</dd></div><div><dt>Списано</dt><dd>{money(spent)}</dd></div><div><dt>Оценка остатка</dt><dd>≈ {money(pending * balance.nextImagePriceRub)}</dd></div></dl>{running && <div className="progress"><div style={{ width: `${items.length ? completed / items.length * 100 : 0}%` }} /></div>}<Button className="full" disabled={!pending || running} onClick={() => void processAll()}>{running ? <><span className="spinner" /> Обрабатываем…</> : `Обработать ${pending || ''}`}</Button><p className="fine-print">Деньги списываются только за успешно обработанные изображения.</p></article></aside></section></>;
 }
 
-function Welcome({ onAuthenticated }: { onAuthenticated: (key: string, reveal: boolean) => void }) {
-  const [mode, setMode] = useState<'register' | 'key'>('register');
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [key, setKey] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  const submit = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      if (mode === 'register') {
-        const result = await api.register(name, email);
-        onAuthenticated(result.apiKey, true);
-      } else {
-        const clean = key.trim();
-        await api.balance(clean);
-        onAuthenticated(clean, false);
-      }
-    } catch (problem) {
-      setError(messageOf(problem));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <View style={styles.welcomeGrid}>
-      <View style={styles.hero}>
-        <View style={styles.pill}><Text style={styles.pillText}>БЕЗ GPU · ПОЛНОСТЬЮ НА .NET</Text></View>
-        <Text style={styles.heroTitle}>Чистый фон.{`\n`}Чистый процесс.</Text>
-        <Text style={styles.heroText}>
-          Загружайте изображения, удаляйте фон и управляйте API в одном кабинете.
-          Новый аккаунт получает 1000 ₽ на старт.
-        </Text>
-        <View style={styles.heroPoints}>
-          <Text style={styles.heroPoint}>✓ JPEG, PNG и WebP</Text>
-          <Text style={styles.heroPoint}>✓ Прозрачный PNG на выходе</Text>
-          <Text style={styles.heroPoint}>✓ От 0,20 ₽ за изображение</Text>
-        </View>
-      </View>
-
-      <View style={[styles.card, styles.authCard]}>
-        <View style={styles.tabs}>
-          <Pressable onPress={() => setMode('register')} style={[styles.tab, mode === 'register' && styles.tabActive]}>
-            <Text style={[styles.tabText, mode === 'register' && styles.tabTextActive]}>Новый аккаунт</Text>
-          </Pressable>
-          <Pressable onPress={() => setMode('key')} style={[styles.tab, mode === 'key' && styles.tabActive]}>
-            <Text style={[styles.tabText, mode === 'key' && styles.tabTextActive]}>У меня есть ключ</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.cardTitle}>{mode === 'register' ? 'Начать бесплатно' : 'Войти по API-ключу'}</Text>
-        <Text style={styles.muted}>
-          {mode === 'register' ? 'Без карты. На балансе сразу 1000 ₽.' : 'Ключ хранится только в этом браузере.'}
-        </Text>
-        <View style={styles.formStack}>
-          {mode === 'register' ? (
-            <>
-              <Field label="Имя или компания" value={name} onChange={setName} placeholder="ООО Ромашка" />
-              <Field label="Email" value={email} onChange={setEmail} type="email" placeholder="hello@example.ru" />
-            </>
-          ) : (
-            <Field label="API-ключ" value={key} onChange={setKey} type="password" placeholder="rb_live_..." />
-          )}
-          {error && <Notice text={error} />}
-          <Button onPress={submit} disabled={busy || (mode === 'register' ? !name.trim() || !email.trim() : !key.trim())}>
-            {busy ? 'Подключаем…' : mode === 'register' ? 'Создать аккаунт' : 'Открыть кабинет'}
-          </Button>
-        </View>
-      </View>
-    </View>
-  );
+function UsageTable({ items, compact = false, onSelect }: { items: UsageItem[]; compact?: boolean; onSelect?: (item: UsageItem) => void }) {
+  return <div className="table-wrap"><table className="data-table"><thead><tr><th>Файл</th><th>Статус</th><th>Дата</th>{!compact && <th>Размер</th>}<th>Время</th><th>Стоимость</th>{onSelect && <th />}</tr></thead><tbody>{items.map((item) => <tr key={item.id} onClick={() => onSelect?.(item)} className={onSelect ? 'clickable-row' : ''}><td><div className="file-cell"><span className="file-mark">PNG</span><div><strong>{item.filename || 'Без имени'}</strong><small>{item.requestId.slice(0, 8)}…</small></div></div></td><td><StatusBadge status={item.status} /></td><td>{date(item.createdAt)}</td>{!compact && <td>{bytes(item.inputBytes)} → {item.outputBytes ? bytes(item.outputBytes) : '—'}</td>}<td>{duration(item.durationMs)}</td><td>{item.priceRub ? money(item.priceRub) : '—'}</td>{onSelect && <td className="chevron">›</td>}</tr>)}</tbody></table></div>;
 }
 
-function Processor({ apiKey, onProcessed }: { apiKey: string; onProcessed: () => void }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [originalUrl, setOriginalUrl] = useState('');
-  const [resultUrl, setResultUrl] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [resultMessage, setResultMessage] = useState('');
-
-  useEffect(() => () => {
-    if (originalUrl) URL.revokeObjectURL(originalUrl);
-  }, [originalUrl]);
-  useEffect(() => () => {
-    if (resultUrl) URL.revokeObjectURL(resultUrl);
-  }, [resultUrl]);
-
-  const choose = (next: File | undefined) => {
-    if (!next) return;
-    setFile(next);
-    setOriginalUrl(URL.createObjectURL(next));
-    setResultUrl('');
-    setError('');
-    setResultMessage('');
-  };
-
-  const process = async () => {
-    if (!file) return;
-    setBusy(true);
-    setError('');
-    try {
-      const result = await api.removeBackground(apiKey, file);
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-      setResultUrl(URL.createObjectURL(result.blob));
-      setResultMessage(`Списано ${result.chargedRub ?? '—'} ₽ · баланс ${result.balanceRub ?? '—'} ₽`);
-      onProcessed();
-    } catch (problem) {
-      setError(messageOf(problem));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <View style={[styles.card, styles.processorCard]}>
-      <View style={styles.sectionHeading}>
-        <View>
-          <Text style={styles.eyebrow}>ОБРАБОТКА</Text>
-          <Text style={styles.cardTitle}>Удалить фон</Text>
-        </View>
-        <Text style={styles.muted}>до 15 МБ</Text>
-      </View>
-      <input
-        ref={inputRef}
-        className="hidden-file"
-        type="file"
-        accept="image/jpeg,image/png,image/webp"
-        onChange={(event) => choose(event.target.files?.[0])}
-      />
-      {!file ? (
-        <Pressable
-          onPress={() => inputRef.current?.click()}
-          onDrop={(event: unknown) => {
-            const dragEvent = event as DragEvent;
-            dragEvent.preventDefault();
-            choose(dragEvent.dataTransfer.files?.[0]);
-          }}
-          onDragOver={(event: unknown) => (event as DragEvent).preventDefault()}
-          style={styles.dropzone}
-        >
-          <View style={styles.uploadIcon}><Text style={styles.uploadIconText}>↑</Text></View>
-          <Text style={styles.dropTitle}>Перетащите изображение сюда</Text>
-          <Text style={styles.muted}>или нажмите, чтобы выбрать файл</Text>
-        </Pressable>
-      ) : (
-        <>
-          <View style={styles.previewGrid}>
-            <View style={styles.previewPane}>
-              <Text style={styles.previewLabel}>ОРИГИНАЛ</Text>
-              <img className="preview-image" src={originalUrl} alt="Оригинал" />
-            </View>
-            <View style={[styles.previewPane, styles.checker]}>
-              <Text style={styles.previewLabel}>РЕЗУЛЬТАТ</Text>
-              {busy ? (
-                <View style={styles.previewEmpty}>
-                  <ActivityIndicator color="#27d3a2" size="large" />
-                  <Text style={styles.muted}>Обрабатываем на CPU…</Text>
-                </View>
-              ) : resultUrl ? (
-                <img className="preview-image" src={resultUrl} alt="Без фона" />
-              ) : (
-                <View style={styles.previewEmpty}><Text style={styles.muted}>Здесь появится PNG</Text></View>
-              )}
-            </View>
-          </View>
-          <View style={styles.fileLine}>
-            <View style={styles.fileMeta}>
-              <Text style={styles.fileName} numberOfLines={1}>{file.name}</Text>
-              <Text style={styles.muted}>{bytes(file.size)}</Text>
-            </View>
-            <Button secondary onPress={() => inputRef.current?.click()}>Заменить</Button>
-          </View>
-          {error && <Notice text={error} />}
-          {resultMessage && <Notice text={resultMessage} kind="success" />}
-          <View style={styles.actionRow}>
-            <Button onPress={process} disabled={busy}>{busy ? 'Обрабатываем…' : 'Удалить фон'}</Button>
-            {resultUrl && <a className="download-button" href={resultUrl} download="background-removed.png">Скачать PNG ↓</a>}
-          </View>
-        </>
-      )}
-    </View>
-  );
+function HistoryPage({ usage }: { usage: Usage }) {
+  const [query, setQuery] = useState(''); const [status, setStatus] = useState<'all' | 'success' | 'failed'>('all'); const [page, setPage] = useState(1); const [selected, setSelected] = useState<UsageItem | null>(null); const pageSize = 20;
+  const filtered = useMemo(() => usage.items.filter((item) => { const matchesQuery = !query || `${item.filename ?? ''} ${item.requestId}`.toLowerCase().includes(query.toLowerCase()); return matchesQuery && (status === 'all' || (status === 'success' ? item.status === 'success' : item.status !== 'success')); }), [query, status, usage.items]); const pages = Math.max(1, Math.ceil(filtered.length / pageSize)); const visible = filtered.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => setPage(1), [query, status]);
+  function exportCsv() { const quote = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`; const rows = [['Дата', 'Файл', 'Статус', 'Вход, байт', 'Выход, байт', 'Время, мс', 'Стоимость, руб.', 'Request ID', 'Ошибка'], ...filtered.map((item) => [item.createdAt, item.filename ?? '', item.status, item.inputBytes, item.outputBytes, item.durationMs, item.priceRub, item.requestId, item.errorCode ?? ''])]; const csv = rows.map((row) => row.map(quote).join(';')).join('\n'); const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = `udalifon-usage-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(url); }
+  return <><PageHeader eyebrow="Аудит" title="История обработок" description={`Всего ${usage.total} операций. В кабинете загружены последние ${usage.items.length}.`} actions={<Button variant="secondary" onClick={exportCsv} disabled={!filtered.length}>↓ Экспорт CSV</Button>} /><section className="panel history-panel"><div className="filters"><label className="search-field"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Файл или Request ID" /></label><div className="segmented"><button className={status === 'all' ? 'active' : ''} onClick={() => setStatus('all')}>Все</button><button className={status === 'success' ? 'active' : ''} onClick={() => setStatus('success')}>Успешные</button><button className={status === 'failed' ? 'active' : ''} onClick={() => setStatus('failed')}>Ошибки</button></div></div>{visible.length ? <UsageTable items={visible} onSelect={setSelected} /> : <EmptyState icon="⌕" title="Ничего не найдено" text="Измените запрос или фильтр статуса." />}{filtered.length > pageSize && <div className="pagination"><span>{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} из {filtered.length}</span><div><button disabled={page === 1} onClick={() => setPage((value) => value - 1)}>←</button><b>{page} / {pages}</b><button disabled={page === pages} onClick={() => setPage((value) => value + 1)}>→</button></div></div>}</section>{selected && <div className="modal-backdrop" onMouseDown={() => setSelected(null)}><aside className="drawer" onMouseDown={(e) => e.stopPropagation()}><button className="drawer-close" onClick={() => setSelected(null)}>×</button><span className="panel-kicker">Детали операции</span><h2>{selected.filename || 'Без имени'}</h2><StatusBadge status={selected.status} /><dl className="detail-list"><div><dt>Дата</dt><dd>{date(selected.createdAt)}</dd></div><div><dt>Request ID</dt><dd><code>{selected.requestId}</code></dd></div><div><dt>Вход</dt><dd>{bytes(selected.inputBytes)}</dd></div><div><dt>Выход</dt><dd>{selected.outputBytes ? bytes(selected.outputBytes) : '—'}</dd></div><div><dt>Время</dt><dd>{duration(selected.durationMs)}</dd></div><div><dt>Стоимость</dt><dd>{money(selected.priceRub)}</dd></div><div><dt>Код ошибки</dt><dd>{selected.errorCode ?? '—'}</dd></div></dl></aside></div>}</>;
 }
 
-function Dashboard({ apiKey, freshKey, onKeySeen, onUnauthorized }: { apiKey: string; freshKey: string; onKeySeen: () => void; onUnauthorized: () => void }) {
-  const [balance, setBalance] = useState<Balance | null>(null);
-  const [usage, setUsage] = useState<Usage | null>(null);
-  const [keys, setKeys] = useState<ApiKeyView[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [keyName, setKeyName] = useState('');
-  const [createdKey, setCreatedKey] = useState<ApiKeyCreated | null>(null);
-  const [adminOpen, setAdminOpen] = useState(false);
-  const [adminToken, setAdminToken] = useState('');
-  const [topUpAccountId, setTopUpAccountId] = useState('');
-  const [topUpAmount, setTopUpAmount] = useState('1000');
-  const [topUpDescription, setTopUpDescription] = useState('Административное пополнение');
-  const [notice, setNotice] = useState('');
-  const [busyAction, setBusyAction] = useState('');
+function KeysPage({ apiKey, keys, reload, notify }: { apiKey: string; keys: ApiKeyView[]; reload: () => Promise<void>; notify: (kind: Toast['kind'], text: string) => void }) {
+  const [name, setName] = useState(''); const [created, setCreated] = useState<ApiKeyCreated | null>(null); const [busy, setBusy] = useState(false); const [showRevoked, setShowRevoked] = useState(false); const [revoke, setRevoke] = useState<ApiKeyView | null>(null); const visible = keys.filter((key) => showRevoked || !key.revokedAt);
+  async function create(event: FormEvent) { event.preventDefault(); if (!name.trim()) return; setBusy(true); try { const result = await api.createKey(apiKey, name.trim()); setCreated(result); setName(''); await reload(); notify('success', 'Новый API-ключ создан'); } catch (caught) { notify('error', errorMessage(caught)); } finally { setBusy(false); } }
+  async function confirmRevoke() { if (!revoke) return; try { await api.revokeKey(apiKey, revoke.id); setRevoke(null); await reload(); notify('success', 'API-ключ отозван'); } catch (caught) { notify('error', errorMessage(caught)); } }
+  return <><PageHeader eyebrow="Доступ" title="API-ключи" description="Разделяйте ключи по окружениям и отзывайте скомпрометированные без остановки сервиса." actions={<span className="counter-chip">{keys.filter((key) => !key.revokedAt).length} активных</span>} /><section className="two-column"><div className="panel"><div className="panel-head"><div><span className="panel-kicker">Ключи аккаунта</span><h2>Управление доступом</h2></div><label className="toggle"><input type="checkbox" checked={showRevoked} onChange={(e) => setShowRevoked(e.target.checked)} /><span />Показывать отозванные</label></div><div className="key-list">{visible.map((key) => <article className="key-row" key={key.id}><div className="key-icon">⌘</div><div className="key-main"><div><strong>{key.name}</strong>{apiKey.startsWith(key.prefix) && !key.revokedAt && <span className="current-label">текущий</span>}</div><code>{key.prefix}••••••••••••</code><small>Создан {date(key.createdAt)} · использован {date(key.lastUsedAt)}</small></div>{key.revokedAt ? <span className="revoked-label">Отозван</span> : <Button variant="ghost" onClick={() => setRevoke(key)}>Отозвать</Button>}</article>)}</div></div><aside className="stack"><form className="panel" onSubmit={create}><span className="panel-kicker">Новый ключ</span><h2>Создать доступ</h2><label className="field"><span>Название</span><input required maxLength={100} value={name} onChange={(e) => setName(e.target.value)} placeholder="Production, CI/CD, агентство…" /></label><Button type="submit" className="full" disabled={busy || !name.trim()}>{busy ? 'Создаём…' : 'Создать API-ключ'}</Button></form><article className="panel security-note"><span>i</span><div><strong>Безопасность</strong><p>Храните ключи в secrets, создавайте отдельный ключ для каждого окружения и регулярно отзывайте неиспользуемые.</p></div></article></aside></section>{created && <div className="modal-backdrop"><div className="modal"><div className="success-mark">✓</div><h2>Ключ создан</h2><p>Скопируйте его сейчас — повторно секрет показан не будет.</p><div className="secret-box"><code>{created.apiKey}</code></div><Button variant="secondary" className="full" onClick={() => { void copyText(created.apiKey); notify('success', 'Ключ скопирован'); }}>Копировать</Button><Button className="full" onClick={() => setCreated(null)}>Готово</Button></div></div>}{revoke && <div className="modal-backdrop" onMouseDown={() => setRevoke(null)}><div className="modal" onMouseDown={(e) => e.stopPropagation()}><div className="danger-mark">!</div><h2>Отозвать «{revoke.name}»?</h2><p>Запросы с этим ключом сразу перестанут работать. Действие необратимо.</p><div className="modal-actions"><Button variant="secondary" onClick={() => setRevoke(null)}>Отмена</Button><Button variant="danger" onClick={() => void confirmRevoke()}>Отозвать</Button></div></div></div>}</>;
+}
 
-  const refresh = useCallback(async () => {
-    try {
-      const [nextBalance, nextUsage, nextKeys] = await Promise.all([
-        api.balance(apiKey), api.usage(apiKey), api.keys(apiKey),
-      ]);
-      setBalance(nextBalance);
-      setUsage(nextUsage);
-      setKeys(nextKeys);
-      setError('');
-    } catch (problem) {
-      if (problem instanceof ApiError && problem.status === 401) onUnauthorized();
-      else setError(messageOf(problem));
-    } finally {
-      setLoading(false);
-    }
-  }, [apiKey, onUnauthorized]);
+function BillingPage({ balance, usage }: { balance: Balance; usage: Usage }) {
+  const [volume, setVolume] = useState(1000); const tierFor = (count: number) => balance.pricing.find((tier) => count >= tier.fromImages && (tier.toImages === null || count <= tier.toImages)) ?? balance.pricing[balance.pricing.length - 1]; const projected = tierFor(volume); const projectedCost = balance.pricing.reduce((total, tier) => { const tierCapacity = tier.toImages === null ? Math.max(0, volume - tier.fromImages) : Math.max(0, Math.min(volume, tier.toImages + 1) - tier.fromImages); return total + tierCapacity * tier.priceRub; }, 0); const current = tierFor(balance.successfulImagesThisMonth); const next = balance.pricing.find((tier) => tier.fromImages > balance.successfulImagesThisMonth); const progress = next ? Math.min(100, balance.successfulImagesThisMonth / next.fromImages * 100) : 100;
+  return <><PageHeader eyebrow="Расходы" title="Тарифы и баланс" description="Прозрачная тарификация: чем больше успешных обработок за месяц, тем ниже цена." /><section className="billing-hero"><div><span>Доступный баланс</span><strong>{money(balance.balanceRub)}</strong><small>Общие расходы за всё время: {money(usage.chargedRub)}</small></div><div className="tier-progress"><div><span>Текущий уровень</span><strong>{money(current.priceRub)} / изображение</strong></div><div className="progress"><div style={{ width: `${progress}%` }} /></div><small>{next ? `${compactNumber(next.fromImages - balance.successfulImagesThisMonth)} до цены ${money(next.priceRub)}` : 'Минимальная цена уже активна'}</small></div></section><section className="pricing-grid">{balance.pricing.map((tier) => <article className={`price-card ${tier === current ? 'current' : ''}`} key={tier.fromImages}>{tier === current && <span className="current-ribbon">Текущий</span>}<small>{tier.toImages === null ? `от ${compactNumber(tier.fromImages)}` : `${compactNumber(tier.fromImages)}–${compactNumber(tier.toImages)}`}</small><strong>{money(tier.priceRub)}</strong><span>за изображение</span></article>)}</section><section className="two-column billing-bottom"><article className="panel calculator"><span className="panel-kicker">Калькулятор</span><h2>Оценка бюджета</h2><label className="field"><span>Изображений в месяц</span><input type="number" min="1" max="10000000" value={volume} onChange={(e) => setVolume(Math.max(1, Number(e.target.value) || 1))} /></label><input className="range" type="range" min="100" max="600000" step="100" value={Math.min(volume, 600000)} onChange={(e) => setVolume(Number(e.target.value))} /><dl className="metric-list"><div><dt>Цена следующего уровня</dt><dd>{money(projected.priceRub)}</dd></div><div><dt>Оценка за месяц</dt><dd>{money(projectedCost)}</dd></div></dl></article><article className="panel"><span className="panel-kicker">Как считается</span><h2>Только успешный результат</h2><ul className="check-list"><li>Неуспешные запросы не списывают баланс</li><li>Уровень зависит от успешных обработок в текущем месяце UTC</li><li>Цена фиксируется перед конкретной обработкой</li><li>Все списания видны в истории и CSV-экспорте</li></ul></article></section></>;
+}
 
-  useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => {
-    if (balance && !topUpAccountId) setTopUpAccountId(balance.accountId);
-  }, [balance, topUpAccountId]);
+function AdminPage({ accountId, reload, notify }: { accountId: string; reload: () => Promise<void>; notify: (kind: Toast['kind'], text: string) => void }) {
+  const [target, setTarget] = useState(accountId); const [token, setToken] = useState(''); const [amount, setAmount] = useState('1000'); const [description, setDescription] = useState('Административное пополнение'); const [busy, setBusy] = useState(false); const [result, setResult] = useState<{ balanceRub: number; addedRub: number } | null>(null);
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setResult(null); try { const response = await api.topUp(target.trim(), token, Number(amount), description.trim()); setResult(response); if (target.trim() === accountId) await reload(); notify('success', `Баланс пополнен на ${money(response.addedRub)}`); } catch (caught) { notify('error', errorMessage(caught)); } finally { setBusy(false); setToken(''); } }
+  return <><PageHeader eyebrow="Служебный раздел" title="Администрирование" description="Ручное пополнение аккаунтов до подключения платёжного провайдера." /><section className="admin-layout"><form className="panel admin-form" onSubmit={submit}><div className="warning-note"><strong>Привилегированная операция</strong><span>Admin-токен отправляется один раз и не сохраняется в браузере.</span></div><label className="field"><span>ID аккаунта</span><input required value={target} onChange={(e) => setTarget(e.target.value)} placeholder="UUID аккаунта" /></label><div className="form-grid"><label className="field"><span>Сумма, ₽</span><input required type="number" min="0.01" max="9999999999.99" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} /></label><label className="field"><span>Admin-токен</span><input required type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" /></label></div><label className="field"><span>Комментарий</span><input maxLength={300} value={description} onChange={(e) => setDescription(e.target.value)} /></label><Button type="submit" disabled={busy}>{busy ? 'Пополняем…' : 'Пополнить баланс'}</Button>{result && <div className="alert alert-success">Новый баланс аккаунта: <b>{money(result.balanceRub)}</b></div>}</form><aside className="panel"><span className="panel-kicker">Текущий аккаунт</span><h2>Реквизиты</h2><div className="copy-row"><code>{accountId}</code><button onClick={() => { void copyText(accountId); notify('success', 'ID скопирован'); }}>Копировать</button></div><p className="muted">Можно указать ID другого аккаунта. Сервер проверит его существование перед пополнением.</p></aside></section></>;
+}
 
-  const createKey = async () => {
-    setBusyAction('key');
-    setNotice('');
-    try {
-      const result = await api.createKey(apiKey, keyName);
-      setCreatedKey(result);
-      setKeyName('');
-      await refresh();
-    } catch (problem) {
-      setNotice(messageOf(problem));
-    } finally {
-      setBusyAction('');
-    }
-  };
+function SettingsPage({ apiKey, balance, health, logout, notify }: { apiKey: string; balance: Balance; health: Health | null; logout: () => void; notify: (kind: Toast['kind'], text: string) => void }) {
+  const [revealed, setRevealed] = useState(false);
+  return <><PageHeader eyebrow="Профиль" title="Настройки" description="Параметры текущей браузерной сессии и подключения к сервису." /><section className="settings-grid"><article className="panel"><span className="panel-kicker">Сессия</span><h2>Текущий доступ</h2><dl className="detail-list"><div><dt>ID аккаунта</dt><dd><code>{balance.accountId}</code></dd></div><div><dt>API-ключ</dt><dd><code>{revealed ? apiKey : `${apiKey.slice(0, 16)}••••••••••••••••`}</code></dd></div></dl><div className="inline-actions"><Button variant="secondary" onClick={() => setRevealed((value) => !value)}>{revealed ? 'Скрыть' : 'Показать'}</Button><Button variant="secondary" onClick={() => { void copyText(apiKey); notify('success', 'Ключ скопирован'); }}>Копировать</Button></div></article><article className="panel"><span className="panel-kicker">Подключение</span><h2>Состояние API</h2><div className="connection-state"><StatusBadge status={health?.status ?? 'error'} /><span>{health ? `${health.model} · ${health.device?.toUpperCase()}` : 'Readiness-проверка не ответила'}</span></div><div className="endpoint-box"><span>Базовый URL</span><code>{window.location.origin}/v1</code></div><a className="button button-secondary full" href="/docs" target="_blank" rel="noreferrer">Swagger UI ↗</a></article><article className="panel danger-zone"><span className="panel-kicker">Локальные данные</span><h2>Завершить сессию</h2><p>API-ключ будет удалён только из localStorage этого браузера. Сам ключ останется активным на сервере.</p><Button variant="danger" onClick={logout}>Выйти и удалить локальный ключ</Button></article></section></>;
+}
 
-  const revoke = async (id: string) => {
-    if (!window.confirm('Отозвать этот API-ключ? Действие нельзя отменить.')) return;
-    setBusyAction(id);
-    try {
-      await api.revokeKey(apiKey, id);
-      await refresh();
-    } catch (problem) {
-      setNotice(messageOf(problem));
-    } finally {
-      setBusyAction('');
-    }
-  };
-
-  const topUp = async () => {
-    if (!topUpAccountId) return;
-    setBusyAction('topup');
-    setNotice('');
-    try {
-      const result = await api.topUp(topUpAccountId, adminToken, Number(topUpAmount), topUpDescription);
-      setNotice(`Баланс пополнен на ${money(result.addedRub)}. Новый баланс: ${money(result.balanceRub)}.`);
-      await refresh();
-    } catch (problem) {
-      setNotice(messageOf(problem));
-    } finally {
-      setBusyAction('');
-    }
-  };
-
-  const activeKeys = useMemo(() => keys.filter((item) => !item.revokedAt).length, [keys]);
-
-  if (loading) return <View style={styles.loader}><ActivityIndicator color="#27d3a2" size="large" /></View>;
-
-  return (
-    <View style={styles.dashboard}>
-      {error && <Notice text={error} />}
-      {freshKey && (
-        <View style={styles.secretBox}>
-          <Text style={styles.secretTitle}>Сохраните первый API-ключ — повторно сервер его не покажет</Text>
-          <code>{freshKey}</code>
-          <View style={styles.actionRow}>
-            <button className="copy-link" onClick={() => navigator.clipboard.writeText(freshKey)}>Копировать ключ</button>
-            <button className="copy-link" onClick={onKeySeen}>Я сохранил</button>
-          </View>
-        </View>
-      )}
-      <View style={styles.statsGrid}>
-        <View style={[styles.statCard, styles.balanceCard]}>
-          <Text style={styles.statLabel}>БАЛАНС</Text>
-          <Text style={styles.statValue}>{money(balance?.balanceRub ?? 0)}</Text>
-          <Text style={styles.statHint}>Аккаунт {balance?.accountId.slice(0, 8)}…</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>ОБРАБОТАНО В ЭТОМ МЕСЯЦЕ</Text>
-          <Text style={styles.statValue}>{balance?.successfulImagesThisMonth ?? 0}</Text>
-          <Text style={styles.statHint}>успешных изображений</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>СЛЕДУЮЩАЯ ОБРАБОТКА</Text>
-          <Text style={styles.statValue}>{money(balance?.nextImagePriceRub ?? 0)}</Text>
-          <Text style={styles.statHint}>спишется только при успехе</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>АКТИВНЫЕ КЛЮЧИ</Text>
-          <Text style={styles.statValue}>{activeKeys}</Text>
-          <Text style={styles.statHint}>из {keys.length} созданных</Text>
-        </View>
-      </View>
-
-      <Processor apiKey={apiKey} onProcessed={refresh} />
-
-      <View style={styles.twoColumns}>
-        <View style={[styles.card, styles.columnCard]}>
-          <View style={styles.sectionHeading}>
-            <View><Text style={styles.eyebrow}>АКТИВНОСТЬ</Text><Text style={styles.cardTitle}>Последние запросы</Text></View>
-            <Text style={styles.muted}>{usage?.successful ?? 0} успешно · {money(usage?.chargedRub ?? 0)}</Text>
-          </View>
-          <ScrollView style={styles.listScroll}>
-            {!usage?.items.length && <Text style={styles.empty}>Пока ни одного запроса.</Text>}
-            {usage?.items.map((item) => (
-              <View key={item.id} style={styles.listItem}>
-                <View style={[styles.statusDot, item.status !== 'success' && styles.statusError]} />
-                <View style={styles.listContent}>
-                  <Text style={styles.listTitle} numberOfLines={1}>{item.filename ?? 'Без имени'}</Text>
-                  <Text style={styles.listMeta}>{date(item.createdAt)} · {item.durationMs} мс</Text>
-                </View>
-                <View style={styles.listAmount}>
-                  <Text style={styles.listTitle}>{item.status === 'success' ? money(item.priceRub) : 'Ошибка'}</Text>
-                  <Text style={styles.listMeta}>{item.status === 'success' ? bytes(item.outputBytes) : item.errorCode}</Text>
-                </View>
-              </View>
-            ))}
-          </ScrollView>
-        </View>
-
-        <View style={[styles.card, styles.columnCard]}>
-          <Text style={styles.eyebrow}>ДОСТУП</Text>
-          <Text style={styles.cardTitle}>API-ключи</Text>
-          <View style={styles.inlineForm}>
-            <div className="grow"><Field label="Название нового ключа" value={keyName} onChange={setKeyName} placeholder="Продакшен" /></div>
-            <Button onPress={createKey} disabled={!keyName.trim() || busyAction === 'key'}>Создать</Button>
-          </View>
-          {createdKey && (
-            <View style={styles.secretBox}>
-              <Text style={styles.secretTitle}>Скопируйте ключ сейчас — повторно он не показывается</Text>
-              <code>{createdKey.apiKey}</code>
-              <button className="copy-link" onClick={() => navigator.clipboard.writeText(createdKey.apiKey)}>Копировать</button>
-            </View>
-          )}
-          <ScrollView style={styles.listScroll}>
-            {keys.map((item) => (
-              <View key={item.id} style={styles.listItem}>
-                <View style={[styles.keyIcon, item.revokedAt ? styles.keyIconOff : undefined]}><Text>⌁</Text></View>
-                <View style={styles.listContent}>
-                  <Text style={styles.listTitle}>{item.name}</Text>
-                  <Text style={styles.listMeta}>{item.prefix}… · {item.revokedAt ? 'отозван' : `был использован ${date(item.lastUsedAt)}`}</Text>
-                </View>
-                {!item.revokedAt && <Button danger onPress={() => revoke(item.id)} disabled={busyAction === item.id}>Отозвать</Button>}
-              </View>
-            ))}
-          </ScrollView>
-        </View>
-      </View>
-
-      <View style={styles.card}>
-        <Pressable style={styles.sectionHeading} onPress={() => setAdminOpen((value) => !value)}>
-          <View><Text style={styles.eyebrow}>АДМИНИСТРИРОВАНИЕ</Text><Text style={styles.cardTitle}>Ручное пополнение</Text></View>
-          <Text style={styles.expand}>{adminOpen ? 'Свернуть ↑' : 'Открыть ↓'}</Text>
-        </Pressable>
-        {adminOpen && (
-          <View style={styles.adminForm}>
-            <Field label="Admin-токен" value={adminToken} onChange={setAdminToken} type="password" placeholder="Не сохраняется в браузере" />
-            <Field label="ID аккаунта" value={topUpAccountId} onChange={setTopUpAccountId} placeholder="UUID аккаунта" />
-            <Field label="Сумма, ₽" value={topUpAmount} onChange={setTopUpAmount} type="number" />
-            <Field label="Описание" value={topUpDescription} onChange={setTopUpDescription} />
-            <Button onPress={topUp} disabled={!adminToken || !topUpAccountId || Number(topUpAmount) <= 0 || busyAction === 'topup'}>Пополнить баланс</Button>
-          </View>
-        )}
-        {notice && <Notice text={notice} kind={notice.startsWith('Баланс') ? 'success' : 'error'} />}
-      </View>
-
-      <View style={styles.footer}>
-        <Text style={styles.muted}>Удалифон · ASP.NET Core + ONNX Runtime CPU + React</Text>
-        <a className="nav-link" href="/health/ready" target="_blank" rel="noreferrer">Статус API</a>
-      </View>
-    </View>
-  );
+function Workspace({ apiKey, onLogout }: { apiKey: string; onLogout: () => void }) {
+  const [page, setPageState] = useState<Page>(pageFromHash); const [menuOpen, setMenuOpen] = useState(false); const [balance, setBalance] = useState<Balance | null>(null); const [usage, setUsage] = useState<Usage | null>(null); const [keys, setKeys] = useState<ApiKeyView[]>([]); const [health, setHealth] = useState<Health | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [toasts, setToasts] = useState<Toast[]>([]); const toastId = useRef(0);
+  const notify = useCallback((kind: Toast['kind'], text: string) => { const id = ++toastId.current; setToasts((current) => [...current, { id, kind, text }]); window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4500); }, []);
+  const reload = useCallback(async (silent = true) => { if (!silent) setLoading(true); setError(''); try { const [balanceResult, usageResult, keysResult] = await Promise.all([api.balance(apiKey), api.usage(apiKey, 200, 0), api.keys(apiKey)]); setBalance(balanceResult); setUsage(usageResult); setKeys(keysResult); api.health().then(setHealth).catch(() => setHealth(null)); } catch (caught) { if (caught instanceof ApiError && caught.status === 401) { onLogout(); return; } setError(errorMessage(caught)); } finally { setLoading(false); } }, [apiKey, onLogout]);
+  useEffect(() => { void reload(false); }, [reload]); useEffect(() => { const change = () => setPageState(pageFromHash()); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change); }, []);
+  function go(next: Page) { window.location.hash = `/${next}`; setPageState(next); setMenuOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  if (loading) return <div className="app-loader"><div className="brand brand-large"><span>У</span> Удалифон</div><span className="spinner spinner-large" /><p>Загружаем рабочую панель…</p></div>;
+  if (!balance || !usage) return <div className="app-loader"><div className="alert alert-error">{error || 'Не удалось загрузить кабинет'}</div><Button onClick={() => void reload(false)}>Повторить</Button><Button variant="ghost" onClick={onLogout}>Выйти</Button></div>;
+  return <div className="app-shell"><aside className={`sidebar ${menuOpen ? 'open' : ''}`}><div className="sidebar-top"><a className="brand" href="#/overview" onClick={() => go('overview')}><span>У</span> Удалифон</a><button className="mobile-close" onClick={() => setMenuOpen(false)}>×</button></div><nav>{nav.map((item, index) => <button key={item.page} className={`${page === item.page ? 'active' : ''} ${index === 5 ? 'nav-divider' : ''}`} onClick={() => go(item.page)}><i>{item.icon}</i><span>{item.label}</span>{item.page === 'processing' && <b>＋</b>}</button>)}</nav><div className="sidebar-account"><div className="avatar">{balance.accountId.slice(0, 2).toUpperCase()}</div><div><strong>Аккаунт</strong><small>{balance.accountId.slice(0, 8)}…</small></div><button title="Выйти" onClick={onLogout}>↗</button></div></aside>{menuOpen && <button className="sidebar-overlay" aria-label="Закрыть меню" onClick={() => setMenuOpen(false)} />}<div className="workspace"><div className="mobile-bar"><button className="menu-button" onClick={() => setMenuOpen(true)}>☰</button><a className="brand" href="#/overview"><span>У</span> Удалифон</a><div className="balance-mini">{money(balance.balanceRub)}</div></div><main className="content">{error && <div className="alert alert-error top-alert">{error}<button onClick={() => void reload()}>Повторить</button></div>}{page === 'overview' && <Overview balance={balance} usage={usage} keys={keys} health={health} go={go} />}{page === 'processing' && <Processor apiKey={apiKey} balance={balance} onProcessed={() => reload()} notify={notify} />}{page === 'history' && <HistoryPage usage={usage} />}{page === 'keys' && <KeysPage apiKey={apiKey} keys={keys} reload={() => reload()} notify={notify} />}{page === 'billing' && <BillingPage balance={balance} usage={usage} />}{page === 'admin' && <AdminPage accountId={balance.accountId} reload={() => reload()} notify={notify} />}{page === 'settings' && <SettingsPage apiKey={apiKey} balance={balance} health={health} logout={onLogout} notify={notify} />}</main></div><div className="toast-stack" aria-live="polite">{toasts.map((toast) => <div key={toast.id} className={`toast toast-${toast.kind}`}><b>{toast.kind === 'success' ? '✓' : toast.kind === 'error' ? '!' : 'i'}</b><span>{toast.text}</span><button onClick={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}>×</button></div>)}</div></div>;
 }
 
 export default function App() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(STORAGE_KEY) ?? '');
-  const [freshKey, setFreshKey] = useState('');
-
-  const authenticate = (key: string, reveal: boolean) => {
-    localStorage.setItem(STORAGE_KEY, key);
-    setApiKey(key);
-    setFreshKey(reveal ? key : '');
-  };
-  const logout = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
-    setApiKey('');
-    setFreshKey('');
-  }, []);
-
-  return (
-    <View style={styles.app}>
-      <View style={styles.glowOne} />
-      <View style={styles.glowTwo} />
-      <View style={styles.container}>
-        <Header authenticated={Boolean(apiKey)} onLogout={logout} />
-        {apiKey ? (
-          <Dashboard apiKey={apiKey} freshKey={freshKey} onKeySeen={() => setFreshKey('')} onUnauthorized={logout} />
-        ) : (
-          <Welcome onAuthenticated={authenticate} />
-        )}
-      </View>
-    </View>
-  );
+  const authorize = useCallback((key: string) => { localStorage.setItem(STORAGE_KEY, key); setApiKey(key); }, []);
+  const logout = useCallback(() => { localStorage.removeItem(STORAGE_KEY); setApiKey(''); window.location.hash = ''; }, []);
+  return apiKey ? <Workspace apiKey={apiKey} onLogout={logout} /> : <AuthScreen onAuthorized={authorize} />;
 }
-
-const styles = StyleSheet.create({
-  app: { minHeight: '100vh', backgroundColor: '#07111f', color: '#edf5f4', position: 'relative', overflow: 'hidden' },
-  container: { width: '100%', maxWidth: 1240, marginHorizontal: 'auto', paddingHorizontal: 24, zIndex: 1 },
-  glowOne: { position: 'absolute', width: 600, height: 600, borderRadius: 999, backgroundColor: '#126c65', opacity: 0.18, filter: 'blur(100px)', top: -340, right: -180 },
-  glowTwo: { position: 'absolute', width: 500, height: 500, borderRadius: 999, backgroundColor: '#1d4b93', opacity: 0.13, filter: 'blur(100px)', bottom: -300, left: -200 },
-  header: { minHeight: 88, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 20, borderBottomWidth: 1, borderBottomColor: '#1b2a3c' },
-  brand: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  logo: { width: 42, height: 42, borderRadius: 12, backgroundColor: '#27d3a2', alignItems: 'center', justifyContent: 'center', transform: 'rotate(-4deg)' },
-  logoText: { color: '#06131c', fontWeight: '900', fontSize: 24 },
-  brandName: { color: '#f5fbfa', fontSize: 19, fontWeight: '800', letterSpacing: -0.4 },
-  brandTag: { color: '#708198', fontSize: 11, marginTop: 1 },
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  welcomeGrid: { minHeight: 'calc(100vh - 88px)', flexDirection: 'row', alignItems: 'center', gap: 72, paddingVertical: 64 },
-  hero: { flex: 1.1 },
-  pill: { alignSelf: 'flex-start', borderWidth: 1, borderColor: '#27544f', backgroundColor: '#102b2b', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, marginBottom: 24 },
-  pillText: { color: '#74e1c1', fontWeight: '700', fontSize: 11, letterSpacing: 1.4 },
-  heroTitle: { color: '#f5fbfa', fontSize: 68, lineHeight: 70, letterSpacing: -3.5, fontWeight: '800' },
-  heroText: { color: '#9eb0c3', fontSize: 19, lineHeight: 30, maxWidth: 610, marginTop: 24 },
-  heroPoints: { marginTop: 32, gap: 12 },
-  heroPoint: { color: '#c7d4dd', fontSize: 15 },
-  card: { backgroundColor: '#0e1b2b', borderWidth: 1, borderColor: '#1c3044', borderRadius: 22, padding: 24, boxShadow: '0 24px 80px rgba(0,0,0,.18)' },
-  authCard: { flex: 0.8, maxWidth: 460, minWidth: 380, padding: 30 },
-  tabs: { flexDirection: 'row', backgroundColor: '#081421', borderRadius: 12, padding: 4, marginBottom: 28 },
-  tab: { flex: 1, borderRadius: 9, paddingVertical: 11, alignItems: 'center' },
-  tabActive: { backgroundColor: '#1a2b3d' },
-  tabText: { color: '#71849a', fontWeight: '650', fontSize: 13 },
-  tabTextActive: { color: '#eef7f5' },
-  cardTitle: { color: '#f1f7f7', fontWeight: '750', fontSize: 24, letterSpacing: -0.6 },
-  muted: { color: '#8293a8', fontSize: 13, lineHeight: 19 },
-  formStack: { gap: 16, marginTop: 24 },
-  button: { minHeight: 43, borderRadius: 11, paddingVertical: 11, paddingHorizontal: 17, backgroundColor: '#27d3a2', alignItems: 'center', justifyContent: 'center' },
-  buttonSecondary: { backgroundColor: '#142439', borderWidth: 1, borderColor: '#2a3d53' },
-  buttonDanger: { backgroundColor: '#3b1c28' },
-  buttonMuted: { opacity: 0.55 },
-  buttonText: { color: '#06151b', fontWeight: '800', fontSize: 13 },
-  buttonSecondaryText: { color: '#c4d2dc' },
-  notice: { backgroundColor: '#421d28', borderWidth: 1, borderColor: '#733040', borderRadius: 10, padding: 12 },
-  noticeSuccess: { backgroundColor: '#12362f', borderColor: '#245e50' },
-  noticeText: { color: '#f1dfe3', fontSize: 13, lineHeight: 19 },
-  loader: { minHeight: 500, alignItems: 'center', justifyContent: 'center' },
-  dashboard: { gap: 22, paddingVertical: 32 },
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 16 },
-  statCard: { flex: 1, minWidth: 220, backgroundColor: '#0d1a2a', borderWidth: 1, borderColor: '#1b3044', padding: 20, borderRadius: 17 },
-  balanceCard: { backgroundColor: '#0f2929', borderColor: '#23564d' },
-  statLabel: { color: '#73869c', fontSize: 10, fontWeight: '800', letterSpacing: 1.1 },
-  statValue: { color: '#f3f9f8', fontSize: 29, fontWeight: '800', letterSpacing: -1, marginTop: 10 },
-  statHint: { color: '#6f8398', fontSize: 11, marginTop: 6 },
-  processorCard: { padding: 26 },
-  sectionHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 20, marginBottom: 20 },
-  eyebrow: { color: '#27d3a2', fontWeight: '800', fontSize: 10, letterSpacing: 1.5, marginBottom: 7 },
-  dropzone: { minHeight: 290, borderWidth: 1, borderStyle: 'dashed', borderColor: '#34506a', borderRadius: 17, alignItems: 'center', justifyContent: 'center', gap: 9, backgroundColor: '#091725' },
-  uploadIcon: { width: 54, height: 54, borderRadius: 17, backgroundColor: '#173d3b', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
-  uploadIconText: { color: '#45dbad', fontSize: 27 },
-  dropTitle: { color: '#edf5f4', fontSize: 17, fontWeight: '700' },
-  previewGrid: { flexDirection: 'row', gap: 14 },
-  previewPane: { flex: 1, height: 350, borderRadius: 15, overflow: 'hidden', backgroundColor: '#07121f', borderWidth: 1, borderColor: '#1e3449', position: 'relative' },
-  checker: { backgroundColor: '#dbe4e5' },
-  previewLabel: { position: 'absolute', zIndex: 2, top: 12, left: 12, color: '#e8f1f1', backgroundColor: 'rgba(4,12,22,.72)', paddingHorizontal: 9, paddingVertical: 5, borderRadius: 7, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
-  previewEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  fileLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 14, marginTop: 16 },
-  fileMeta: { flex: 1 },
-  fileName: { color: '#e8f1f1', fontSize: 14, fontWeight: '700' },
-  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16 },
-  twoColumns: { flexDirection: 'row', gap: 22, alignItems: 'stretch' },
-  columnCard: { flex: 1, minWidth: 0 },
-  listScroll: { maxHeight: 340 },
-  empty: { color: '#718399', paddingVertical: 35, textAlign: 'center' },
-  listItem: { flexDirection: 'row', alignItems: 'center', gap: 11, borderTopWidth: 1, borderTopColor: '#1a2b3d', paddingVertical: 13 },
-  statusDot: { width: 8, height: 8, borderRadius: 9, backgroundColor: '#27d3a2' },
-  statusError: { backgroundColor: '#e66f88' },
-  listContent: { flex: 1, minWidth: 0 },
-  listAmount: { alignItems: 'flex-end' },
-  listTitle: { color: '#dfe9eb', fontSize: 13, fontWeight: '650' },
-  listMeta: { color: '#718398', fontSize: 10, marginTop: 4 },
-  inlineForm: { flexDirection: 'row', alignItems: 'flex-end', gap: 10, marginVertical: 18 },
-  secretBox: { backgroundColor: '#112d2c', borderWidth: 1, borderColor: '#22594e', borderRadius: 11, padding: 13, gap: 8, marginBottom: 10 },
-  secretTitle: { color: '#bce9dc', fontSize: 11 },
-  keyIcon: { width: 34, height: 34, borderRadius: 9, backgroundColor: '#173c38', alignItems: 'center', justifyContent: 'center' },
-  keyIconOff: { opacity: 0.35 },
-  expand: { color: '#77dbc0', fontSize: 12 },
-  adminForm: { display: 'grid', gridTemplateColumns: '1.7fr 1.5fr .7fr 1.5fr auto', gap: 12, alignItems: 'end' },
-  footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 18 },
-});
