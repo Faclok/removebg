@@ -1,23 +1,30 @@
-FROM python:3.12-slim
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    U2NET_HOME=/models \
-    OMP_NUM_THREADS=4
+COPY global.json RemoveBg.slnx ./
+COPY src/RemoveBg.Api/RemoveBg.Api.csproj src/RemoveBg.Api/
+RUN dotnet restore src/RemoveBg.Api/RemoveBg.Api.csproj
 
+COPY src/RemoveBg.Api src/RemoveBg.Api
+RUN dotnet publish src/RemoveBg.Api/RemoveBg.Api.csproj \
+    --configuration Release \
+    --output /app/publish \
+    --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 curl \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /data /models \
+    && chown -R app:app /data /models
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY app ./app
-RUN pip install --upgrade pip && pip install .
+COPY --from=build /app/publish .
 
-RUN mkdir -p /data /models && chown -R nobody:nogroup /data /models /app
-USER nobody
+ENV ASPNETCORE_URLS=http://+:8000 \
+    DOTNET_EnableDiagnostics=0
 
+USER app
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
-
+ENTRYPOINT ["dotnet", "RemoveBg.Api.dll"]

@@ -1,138 +1,122 @@
 # Удалифон API
 
-CPU-only сервер удаления фона для товарных изображений. Он принимает JPEG/PNG/WebP,
-возвращает прозрачный PNG, ведёт рублёвый баланс, статистику и несколько API-ключей на
-одну организацию.
+CPU-only сервер удаления фона на **ASP.NET Core 10**. API принимает JPEG/PNG/WebP,
+запускает BiRefNet через ONNX Runtime и возвращает прозрачный PNG. Python и GPU не
+используются.
 
 Новый аккаунт автоматически получает **1000 ₽**. Деньги списываются только после
-успешного удаления фона; ошибки клиента и сервера бесплатны.
+успешной обработки; ошибочные запросы бесплатны.
 
-## Что уже реализовано
+## Реализовано
 
-- модель `birefnet-general-lite` через `rembg` и **только CPUExecutionProvider**;
-- `POST /v1/remove-background` с бинарным PNG в ответе;
-- регистрация организации и API-ключ, который показывается один раз;
-- баланс в копейках и неизменяемая история операций;
-- помесячная тарификация: 0,60 / 0,45 / 0,30 / 0,20 ₽ за успешное изображение;
-- статистика успешных и неуспешных запросов;
-- выпуск и отзыв дополнительных API-ключей;
+- чистый .NET 10, ASP.NET Core Minimal API;
+- `birefnet-general-lite.onnx` через `Microsoft.ML.OnnxRuntime` CPU package;
+- декодирование и формирование PNG через SkiaSharp с MIT-лицензией;
+- аккаунты, несколько API-ключей и хранение только SHA-256-хешей ключей;
+- баланс в копейках, ledger и журнал успешных/неуспешных обработок;
+- атомарное списание после успешного получения результата;
+- помесячные тарифные ступени 0,60 / 0,45 / 0,30 / 0,20 ₽;
 - защищённое ручное пополнение баланса до подключения эквайринга;
-- Swagger UI, ReDoc, Docker и автоматические тесты.
+- Swagger UI, Docker Compose, health-check и интеграционные тесты.
 
-## Быстрый запуск через Docker
+## Запуск в Docker
 
 ```bash
 cp .env.example .env
-# В .env задайте случайный ADMIN_TOKEN
+# Замените Admin__Token в .env на случайную длинную строку
 docker compose up --build
 ```
 
 После запуска:
 
 - Swagger UI: <http://localhost:8000/docs>
-- ReDoc: <http://localhost:8000/redoc>
-- OpenAPI JSON: <http://localhost:8000/openapi.json>
+- OpenAPI JSON: <http://localhost:8000/swagger/v1/swagger.json>
 - readiness: <http://localhost:8000/health/ready>
 
-При первой обработке `rembg` скачает модель в Docker volume `removebg-models`. Первый
-запрос поэтому выполняется заметно дольше последующих.
+При первой обработке сервер скачивает ONNX-модель в volume `removebg-models` и проверяет
+её контрольную сумму. Последующие запуски используют сохранённый файл.
 
 ## Локальный запуск
 
-Требуется Python 3.11–3.13.
+Нужен .NET SDK 10.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
-cp .env.example .env
-uvicorn app.main:app --reload
+dotnet restore RemoveBg.slnx
+dotnet run --project src/RemoveBg.Api
 ```
+
+По умолчанию сервер использует `runtime/removebg.db`, а модель сохраняет в `models/`.
 
 ## Первый запрос
 
-### 1. Регистрация
+### Регистрация
 
 ```bash
-curl -sS http://localhost:8000/v1/accounts/register \
+curl -sS http://localhost:5000/v1/accounts/register \
   -H 'Content-Type: application/json' \
   -d '{"name":"ООО Ромашка","email":"api@example.ru"}'
 ```
 
-Ответ содержит `api_key` и `balance_rub: 1000.00`. Ключ хранится на сервере только в
-виде SHA-256-хеша, поэтому скопируйте его сразу.
+Ответ содержит `apiKey` и `balanceRub: 1000.00`. Секрет ключа показывается только один
+раз.
 
-### 2. Удаление фона
+### Удаление фона
 
 ```bash
-curl -sS http://localhost:8000/v1/remove-background \
+curl -sS http://localhost:5000/v1/remove-background \
   -H 'X-API-Key: rb_live_ВАШ_КЛЮЧ' \
   -F 'image=@product.jpg' \
   --output product-no-bg.png \
   --dump-header -
 ```
 
-В заголовках ответа будут цена операции, остаток баланса, размер исходного изображения
-и `X-Request-ID`. Вместо `X-API-Key` можно использовать
-`Authorization: Bearer rb_live_...`.
+Вместо `X-API-Key` поддерживается `Authorization: Bearer rb_live_...`. В заголовках
+ответа возвращаются `X-Charged-Rub`, `X-Balance-Rub`, размеры оригинала и
+`X-Request-ID`.
 
-### 3. Баланс и статистика
+Полный перечень методов находится в [API.md](API.md).
 
-```bash
-curl -sS http://localhost:8000/v1/balance -H 'X-API-Key: rb_live_ВАШ_КЛЮЧ'
-curl -sS http://localhost:8000/v1/usage -H 'X-API-Key: rb_live_ВАШ_КЛЮЧ'
-```
+## Конфигурация
 
-Полное описание методов и ответов находится в [API.md](API.md).
+Настройки можно задавать в `appsettings.json` или переменными окружения .NET с двойным
+подчёркиванием:
 
-## Настройки
-
-Основные переменные перечислены в `.env.example`:
-
-| Переменная | Значение по умолчанию | Назначение |
+| Переменная | По умолчанию | Назначение |
 |---|---:|---|
-| `DATABASE_URL` | `sqlite:///./data/removebg.db` | SQLite; можно заменить на PostgreSQL URL |
-| `STARTING_BALANCE_KOPECKS` | `100000` | 1000 ₽ каждому новому аккаунту |
-| `BACKGROUND_MODEL` | `birefnet-general-lite` | CPU-модель `rembg` |
-| `MAX_UPLOAD_BYTES` | `15728640` | максимум 15 MiB на файл |
-| `MAX_IMAGE_PIXELS` | `40000000` | защита от чрезмерно больших изображений |
-| `CPU_WORKERS` | `2` | одновременно выполняемые инференсы |
-| `OMP_NUM_THREADS` | `4` | CPU-потоки ONNX Runtime |
-| `ADMIN_TOKEN` | пусто | включает ручное административное пополнение |
-
-Для PostgreSQL установите extra `.[postgres]` и задайте, например,
-`DATABASE_URL=postgresql+psycopg://user:password@postgres/removebg`.
+| `Database__ConnectionString` | `Data Source=runtime/removebg.db` | строка подключения SQLite |
+| `Accounts__StartingBalanceKopecks` | `100000` | 1000 ₽ новому аккаунту |
+| `Removal__ModelPath` | `models/birefnet-general-lite.onnx` | локальный ONNX-файл |
+| `Removal__MaxUploadBytes` | `15728640` | максимум 15 MiB |
+| `Removal__MaxImagePixels` | `40000000` | предел количества пикселей |
+| `Removal__CpuWorkers` | `2` | параллельные инференсы |
+| `Removal__IntraOpThreads` | `4` | CPU-потоки одного инференса |
+| `Admin__Token` | пусто | включает административное пополнение |
 
 ## Тарификация
 
-Граница определяется количеством успешных обработок аккаунта в текущем календарном
-месяце UTC. Цена следующего изображения доступна через `/v1/balance`.
+Цена следующей обработки зависит от успешного объёма аккаунта в текущем календарном
+месяце UTC:
 
-| Объём за месяц | Цена успешной обработки |
+| Объём | Цена |
 |---:|---:|
 | 0–9 999 | 0,60 ₽ |
 | 10 000–99 999 | 0,45 ₽ |
 | 100 000–499 999 | 0,30 ₽ |
 | от 500 000 | 0,20 ₽ |
 
-Это ступенчатая цена: после достижения границы новая стоимость применяется к следующим
-изображениям, а уже проведённые списания не пересчитываются.
-
 ## Проверка
 
 ```bash
-pytest
-ruff check .
+dotnet build RemoveBg.slnx
+dotnet test RemoveBg.slnx
+dotnet format RemoveBg.slnx --verify-no-changes
 ```
 
-Тесты используют поддельный обработчик изображения и не скачивают ML-модель.
+Интеграционные тесты подменяют ML-обработчик, поэтому не скачивают модель.
 
-## Важно перед публичным запуском
+## Перед публичным запуском
 
-Регистрация сейчас открыта, поэтому стартовые 1000 ₽ легко получить повторной
-регистрацией с новым email. Для закрытого пилота это удобно. Перед публичным запуском
-нужно добавить подтверждение email, CAPTCHA/лимит регистрации, миграции Alembic,
-резервные копии базы, наблюдаемость и внешний rate limit. Не запускайте несколько
-процессов с общей SQLite-базой; для горизонтального масштабирования используйте
-PostgreSQL и очередь CPU workers.
-
+Открытая регистрация сейчас намеренно начисляет каждому email 1000 ₽. Для закрытого
+пилота это удобно, но перед публичным запуском необходимо добавить подтверждение email,
+CAPTCHA/лимиты регистрации, rate limiting, EF Core migrations, резервное копирование и
+наблюдаемость. Для нескольких экземпляров API SQLite нужно заменить на PostgreSQL.

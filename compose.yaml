@@ -7,8 +7,8 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: sqlite:////data/removebg.db
-      U2NET_HOME: /models
+      Database__ConnectionString: Data Source=/data/removebg.db
+      Removal__ModelPath: /models/birefnet-general-lite.onnx
     volumes:
       - removebg-data:/data
       - removebg-models:/models
@@ -27,4 +27,3 @@ services:
 volumes:
   removebg-data:
   removebg-models:
-

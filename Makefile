@@ -1,20 +1,22 @@
-.PHONY: install dev test lint docker-up docker-down
+.PHONY: restore dev build test format docker-up docker-down
 
-install:
-	python -m pip install -e ".[dev]"
+restore:
+	dotnet restore RemoveBg.slnx
 
 dev:
-	uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	dotnet watch --project src/RemoveBg.Api
+
+build:
+	dotnet build RemoveBg.slnx --no-restore
 
 test:
-	pytest
+	dotnet test RemoveBg.slnx --no-restore
 
-lint:
-	ruff check .
+format:
+	dotnet format RemoveBg.slnx
 
 docker-up:
 	docker compose up --build
 
 docker-down:
 	docker compose down
-

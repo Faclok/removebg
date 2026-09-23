@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/RemoveBg.Api/RemoveBg.Api.csproj" />
+  <Project Path="tests/RemoveBg.Api.Tests/RemoveBg.Api.Tests.csproj" />
+</Solution>
