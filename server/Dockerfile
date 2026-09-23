@@ -33,8 +33,8 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /data /models \
-    && chown -R app:app /data /models
+    && mkdir -p /models \
+    && chown -R app:app /models
 
 WORKDIR /app
 COPY --from=build /app/publish .

@@ -20,8 +20,8 @@ builder.Services.AddDbContext<AppDbContext>((services, options) =>
 {
     var configuration = services.GetRequiredService<IConfiguration>();
     var connectionString = configuration[$"{DatabaseOptions.SectionName}:ConnectionString"]
-        ?? "Data Source=runtime/removebg.db";
-    options.UseSqlite(connectionString);
+        ?? throw new InvalidOperationException("Database:ConnectionString is required");
+    options.UseMySQL(connectionString, mysql => mysql.EnableRetryOnFailure(5));
 });
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddSingleton<IBackgroundRemovalService, BackgroundRemovalService>();
@@ -95,21 +95,15 @@ await app.RunAsync();
 
 static async Task InitializeDatabaseAsync(WebApplication app)
 {
-    var connectionString = app.Configuration[$"{DatabaseOptions.SectionName}:ConnectionString"]
-        ?? "Data Source=runtime/removebg.db";
-    var dataSource = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connectionString).DataSource;
-    var directory = Path.GetDirectoryName(Path.GetFullPath(dataSource));
-    if (!string.IsNullOrWhiteSpace(directory))
-    {
-        Directory.CreateDirectory(directory);
-    }
-
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.EnsureCreatedAsync();
-    await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
-    await db.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys=ON;");
-    await db.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout=30000;");
+    if (app.Environment.IsEnvironment("Testing"))
+    {
+        await db.Database.EnsureCreatedAsync();
+        return;
+    }
+
+    await db.Database.MigrateAsync();
 }
 
 public partial class Program;

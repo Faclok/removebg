@@ -10,6 +10,7 @@ Runtime и возвращает прозрачный PNG. Python и GPU не и�
 ## Реализовано
 
 - чистый .NET 10, ASP.NET Core Minimal API;
+- MySQL 8.4 и EF Core 10 с автоматическими migrations при запуске;
 - `birefnet-general-lite.onnx` через `Microsoft.ML.OnnxRuntime` CPU package;
 - декодирование и формирование PNG через SkiaSharp с MIT-лицензией;
 - аккаунты, несколько API-ключей и хранение только SHA-256-хешей ключей;
@@ -23,10 +24,12 @@ Runtime и возвращает прозрачный PNG. Python и GPU не и�
 
 ## Архитектура
 
-`docker compose` запускает два контейнера:
+`docker compose` запускает три контейнера:
 
+- `mysql` — MySQL 8.4 с постоянным volume;
 - `api` — ASP.NET Core API, доступный только внутри Docker-сети на порту 8000;
-- `web` — production-сборка React в Nginx, опубликованная на порту 8000 хоста.
+- `web` — production-сборка React в Nginx; локальный override публикует её на порту
+  8000 хоста.
 
 Nginx отдаёт кабинет с `/` и перенаправляет `/v1`, `/docs`, `/swagger` и `/health`
 в контейнер API. Поэтому браузер и внешние клиенты используют один адрес.
@@ -42,7 +45,7 @@ Nginx отдаёт кабинет с `/` и перенаправляет `/v1`, 
 
 ```bash
 cp .env.example .env
-# Замените Admin__Token в .env на случайную длинную строку
+# Замените пароли MySQL и Admin__Token в .env
 docker compose -f compose.yaml -f compose.local.yaml up --build
 ```
 
@@ -52,12 +55,17 @@ docker compose -f compose.yaml -f compose.local.yaml up --build
 (локальный override `compose.local.yaml` в Coolify подключать не нужно).
 Публичный домен назначайте сервису `web` на внутренний порт `80`; сервис `api`
 должен оставаться внутренним. Постоянные данные находятся в volumes
-`removebg-data` и `removebg-models`.
+`removebg-mysql` и `removebg-models`. Сервису `mysql` публичный домен или host-port
+назначать не нужно.
 
 В переменных окружения Coolify задайте как минимум:
 
 ```env
 ASPNETCORE_ENVIRONMENT=Production
+MYSQL_DATABASE=removebg
+MYSQL_USER=removebg
+MYSQL_PASSWORD=замените-на-длинный-пароль
+MYSQL_ROOT_PASSWORD=замените-на-другой-длинный-пароль
 Admin__Token=замените-на-длинную-случайную-строку
 ```
 
@@ -86,7 +94,16 @@ Dockerfile автоматически публикует нативные зав
 
 ## Локальная разработка
 
-Нужны .NET SDK 10 и Node.js 24+.
+Нужны .NET SDK 10, Node.js 24+ и MySQL 8.4. Проще всего сначала запустить MySQL
+из Compose:
+
+```bash
+cp .env.example .env
+docker compose -f compose.yaml -f compose.local.yaml up -d mysql
+```
+
+Для запуска API вне Docker замените `Database__ConnectionString` на строку с
+`Server=localhost` или используйте значение из `appsettings.json`.
 
 ```bash
 cd server
@@ -103,8 +120,8 @@ npm run dev
 ```
 
 Кабинет будет доступен на <http://localhost:5173>; Vite перенаправляет API-запросы на
-<http://localhost:5000>. По умолчанию сервер использует `runtime/removebg.db`, а модель
-сохраняет в `models/`.
+<http://localhost:5000>. Модель сохраняется в `models/`. При запуске API EF Core
+автоматически применяет недостающие migrations к MySQL.
 
 ## Первый запрос
 
@@ -142,7 +159,11 @@ curl -sS http://localhost:8000/v1/remove-background \
 
 | Переменная | По умолчанию | Назначение |
 |---|---:|---|
-| `Database__ConnectionString` | `Data Source=runtime/removebg.db` | строка подключения SQLite |
+| `Database__ConnectionString` | MySQL на `localhost:3306` | строка подключения MySQL |
+| `MYSQL_DATABASE` | `removebg` | база, создаваемая MySQL-контейнером |
+| `MYSQL_USER` | `removebg` | пользователь MySQL |
+| `MYSQL_PASSWORD` | обязательна | пароль приложения |
+| `MYSQL_ROOT_PASSWORD` | обязательна | root-пароль MySQL |
 | `Accounts__StartingBalanceKopecks` | `100000` | 1000 ₽ новому аккаунту |
 | `Removal__ModelPath` | `models/birefnet-general-lite.onnx` | локальный ONNX-файл |
 | `Removal__MaxUploadBytes` | `15728640` | максимум 15 MiB |
@@ -174,11 +195,12 @@ cd ..
 cd client && npm run build
 ```
 
-Интеграционные тесты подменяют ML-обработчик, поэтому не скачивают модель.
+Интеграционные тесты подменяют ML-обработчик и используют временную SQLite только как
+тестовый provider, поэтому не требуют MySQL и не скачивают модель.
 
 ## Перед публичным запуском
 
 Открытая регистрация сейчас намеренно начисляет каждому email 1000 ₽. Для закрытого
 пилота это удобно, но перед публичным запуском необходимо добавить подтверждение email,
-CAPTCHA/лимиты регистрации, rate limiting, EF Core migrations, резервное копирование и
-наблюдаемость. Для нескольких экземпляров API SQLite нужно заменить на PostgreSQL.
+CAPTCHA/лимиты регистрации, rate limiting, регулярное резервное копирование MySQL и
+наблюдаемость.

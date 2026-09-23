@@ -3,7 +3,8 @@ namespace RemoveBg.Api.Configuration;
 public sealed class DatabaseOptions
 {
     public const string SectionName = "Database";
-    public string ConnectionString { get; init; } = "Data Source=runtime/removebg.db";
+    public string ConnectionString { get; init; } =
+        "Server=localhost;Port=3306;Database=removebg;User=removebg;Password=removebg";
 }
 
 public sealed class AccountOptions

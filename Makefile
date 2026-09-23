@@ -1,4 +1,4 @@
-.PHONY: restore dev build test format client-install client-dev client-build docker-up docker-down
+.PHONY: restore dev build test format migrate client-install client-dev client-build db-up docker-up docker-down
 
 restore:
 	cd server && dotnet restore RemoveBg.slnx
@@ -15,6 +15,9 @@ test:
 format:
 	cd server && dotnet format RemoveBg.slnx
 
+migrate:
+	cd server && dotnet ef database update --project src/RemoveBg.Api --startup-project src/RemoveBg.Api
+
 client-install:
 	cd client && npm install
 
@@ -23,6 +26,9 @@ client-dev:
 
 client-build:
 	cd client && npm run build
+
+db-up:
+	docker compose -f compose.yaml -f compose.local.yaml up -d mysql
 
 docker-up:
 	docker compose -f compose.yaml -f compose.local.yaml up --build

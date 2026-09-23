@@ -1,9 +1,12 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using RemoveBg.Api.Data;
 using RemoveBg.Api.Services;
 
 namespace RemoveBg.Api.Tests;
@@ -23,17 +26,21 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.UseEnvironment("Testing");
         builder.ConfigureAppConfiguration((_, configuration) =>
         {
             configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Database:ConnectionString"] = $"Data Source={databasePath};Pooling=False",
                 ["Accounts:StartingBalanceKopecks"] = "100000",
                 ["Admin:Token"] = "test-admin-token"
             });
         });
         builder.ConfigureTestServices(services =>
         {
+            services.RemoveAll<IDbContextOptionsConfiguration<AppDbContext>>();
+            services.RemoveAll<DbContextOptions<AppDbContext>>();
+            services.AddDbContext<AppDbContext>(options =>
+                options.UseSqlite($"Data Source={databasePath};Pooling=False"));
             services.RemoveAll<IBackgroundRemovalService>();
             services.AddSingleton<IBackgroundRemovalService>(new FakeRemovalService(failProcessing));
         });
