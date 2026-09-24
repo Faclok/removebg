@@ -1,8 +1,9 @@
 using System.Net;
-using System.Net.Mail;
-using System.Text;
+using MailKit.Security;
 using Microsoft.Extensions.Options;
+using MimeKit;
 using RemoveBg.Api.Configuration;
+using SmtpClient = MailKit.Net.Smtp.SmtpClient;
 
 namespace RemoveBg.Api.Services;
 
@@ -37,26 +38,29 @@ public sealed class SmtpAccountEmailSender(
 
         try
         {
-            using var message = new MailMessage
+            var message = new MimeMessage();
+            message.From.Add(new MailboxAddress(settings.FromName, settings.FromAddress));
+            message.To.Add(MailboxAddress.Parse(recipientEmail));
+            message.Subject = "Пароль от аккаунта Удалифон";
+            message.Body = new BodyBuilder
             {
-                From = new MailAddress(settings.FromAddress, settings.FromName, Encoding.UTF8),
-                Subject = "Пароль от аккаунта Удалифон",
-                SubjectEncoding = Encoding.UTF8,
-                BodyEncoding = Encoding.UTF8,
-                IsBodyHtml = true,
-                Body = BuildBody(recipientName, password, settings.LoginUrl)
-            };
-            message.To.Add(new MailAddress(recipientEmail));
+                TextBody = BuildTextBody(recipientName, password, settings.LoginUrl),
+                HtmlBody = BuildHtmlBody(recipientName, password, settings.LoginUrl)
+            }.ToMessageBody();
 
-            using var client = new SmtpClient(settings.Host, settings.Port)
+            using var client = new SmtpClient { Timeout = 15_000 };
+            var socketOptions = settings.EnableSsl
+                ? settings.Port == 465
+                    ? SecureSocketOptions.SslOnConnect
+                    : SecureSocketOptions.StartTls
+                : SecureSocketOptions.None;
+            await client.ConnectAsync(settings.Host, settings.Port, socketOptions, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(settings.Username))
             {
-                EnableSsl = settings.EnableSsl,
-                UseDefaultCredentials = false,
-                Credentials = string.IsNullOrWhiteSpace(settings.Username)
-                    ? null
-                    : new NetworkCredential(settings.Username, settings.Password)
-            };
-            await client.SendMailAsync(message, cancellationToken);
+                await client.AuthenticateAsync(settings.Username, settings.Password, cancellationToken);
+            }
+            await client.SendAsync(message, cancellationToken);
+            await client.DisconnectAsync(true, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -65,7 +69,19 @@ public sealed class SmtpAccountEmailSender(
         }
     }
 
-    private static string BuildBody(string recipientName, string password, string loginUrl)
+    private static string BuildTextBody(string recipientName, string password, string loginUrl) =>
+        $"""
+        {recipientName}, ваш аккаунт Удалифон создан.
+
+        Пароль для входа:
+        {password}
+
+        Войти: {loginUrl}
+
+        Храните пароль в надёжном месте и никому его не передавайте.
+        """;
+
+    private static string BuildHtmlBody(string recipientName, string password, string loginUrl)
     {
         var safeName = WebUtility.HtmlEncode(recipientName);
         var safePassword = WebUtility.HtmlEncode(password);
