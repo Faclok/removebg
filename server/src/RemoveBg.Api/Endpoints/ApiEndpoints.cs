@@ -1,5 +1,3 @@
-using System.Diagnostics;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
@@ -42,7 +40,7 @@ public static class ApiEndpoints
             .WithName("RemoveBackground")
             .WithSummary("Удалить фон изображения")
             .Accepts<IFormFile>("multipart/form-data")
-            .Produces<byte[]>(200, contentType: "image/png")
+            .Produces<JobAcceptedResponse>(202)
             .Produces<ErrorEnvelope>(402)
             .Produces<ErrorEnvelope>(413)
             .Produces<ErrorEnvelope>(415)
@@ -50,6 +48,20 @@ public static class ApiEndpoints
             .Produces<ErrorEnvelope>(429)
             .Produces<ErrorEnvelope>(503)
             .DisableAntiforgery();
+        authorized.MapGet("/jobs/{jobId:guid}", GetJobAsync)
+            .WithName("GetImageJob")
+            .WithSummary("Получить статус и метрики задания")
+            .Produces<JobStatusResponse>();
+        authorized.MapGet("/jobs/{jobId:guid}/result", GetJobResultAsync)
+            .WithName("GetImageJobResult")
+            .WithSummary("Скачать результат готового задания")
+            .Produces<byte[]>(200, contentType: "image/png")
+            .Produces<ErrorEnvelope>(404)
+            .Produces<ErrorEnvelope>(409);
+        authorized.MapGet("/metrics", GetMetricsAsync)
+            .WithName("GetProcessingMetrics")
+            .WithSummary("Получить агрегированные метрики обработки")
+            .Produces<ProcessingMetricsResponse>();
         authorized.MapGet("/usage", GetUsageAsync)
             .WithName("GetUsage")
             .WithSummary("Получить статистику и журнал обработок")
@@ -160,13 +172,12 @@ public static class ApiEndpoints
         IFormFile image,
         AppDbContext db,
         BillingService billing,
-        IBackgroundRemovalService removal,
-        ImageProcessingGate processingGate,
-        ILogger<Program> logger,
+        ImageInputValidator validator,
+        ImageJobQueue queue,
+        RemovalRuntimeSettings runtime,
         IOptions<RemovalOptions> options,
         CancellationToken cancellationToken)
     {
-        var started = Stopwatch.StartNew();
         var accountId = context.User.GetAccountId();
         var apiKeyId = context.User.GetApiKeyId();
         var requestId = context.GetRequestId();
@@ -204,70 +215,195 @@ public static class ApiEndpoints
         {
             await stream.ReadExactlyAsync(input.AsMemory(), cancellationToken);
         }
+        var validated = validator.Validate(input, image.ContentType.ToLowerInvariant());
+        var filename = Path.GetFileName(image.FileName);
+        if (filename.Length > 255)
+        {
+            filename = filename[..255];
+        }
+        var job = new ImageJob
+        {
+            Id = requestId,
+            RequestId = requestId,
+            AccountId = accountId,
+            ApiKeyId = apiKeyId,
+            Status = "queued",
+            Filename = filename,
+            ContentType = validated.ContentType,
+            InputData = input,
+            InputBytes = input.Length,
+            Width = validated.Width,
+            Height = validated.Height,
+            PriceKopecks = price,
+            MaxAttempts = runtime.MaxAttempts
+        };
+        db.ImageJobs.Add(job);
+        await db.SaveChangesAsync(cancellationToken);
 
-        RemovalResult result;
-        var processingLease = await processingGate.AcquireAsync(cancellationToken);
-        try
+        if (!queue.TryEnqueue(job.Id))
         {
-            using (processingLease)
-            {
-                result = await removal.RemoveAsync(input, cancellationToken);
-            }
-        }
-        catch (ApiException exception)
-        {
-            await billing.RecordFailureAsync(
-                requestId,
-                accountId,
-                apiKeyId,
-                image.FileName,
-                input.Length,
-                started.ElapsedMilliseconds,
-                exception.Code,
-                cancellationToken);
-            throw;
-        }
-        catch (Exception exception)
-        {
-            logger.LogError(
-                exception,
-                "Image processing failed for request {RequestId}",
-                requestId);
-            await billing.RecordFailureAsync(
-                requestId,
-                accountId,
-                apiKeyId,
-                image.FileName,
-                input.Length,
-                started.ElapsedMilliseconds,
-                "processing_failed",
-                cancellationToken);
-            throw new ApiException(503, "processing_failed", "Не удалось обработать изображение")
-            {
-                Source = exception.Source
-            };
+            db.ImageJobs.Remove(job);
+            await db.SaveChangesAsync(cancellationToken);
+            context.Response.Headers.RetryAfter = "5";
+            throw new ApiException(429, "server_busy", "Очередь обработки заполнена");
         }
 
-        var balanceAfter = await billing.ChargeSuccessAsync(
-            requestId,
-            accountId,
-            apiKeyId,
-            image.FileName,
-            input.Length,
-            result.Png.Length,
-            result.DurationMs,
-            price,
-            cancellationToken);
-        context.Response.Headers["X-Image-Width"] = result.Width.ToString();
-        context.Response.Headers["X-Image-Height"] = result.Height.ToString();
-        context.Response.Headers["X-Processing-Duration-Ms"] = result.DurationMs.ToString();
-        context.Response.Headers["Server-Timing"] = $"image;dur={result.DurationMs}";
-        context.Response.Headers["X-Charged-Rub"] = BillingService.Rubles(price)
-            .ToString("0.00", CultureInfo.InvariantCulture);
-        context.Response.Headers["X-Balance-Rub"] = BillingService.Rubles(balanceAfter)
-            .ToString("0.00", CultureInfo.InvariantCulture);
-        return Results.File(result.Png, "image/png", "background-removed.png");
+        var statusUrl = $"/v1/jobs/{job.Id}";
+        context.Response.Headers.Location = statusUrl;
+        context.Response.Headers.RetryAfter = "1";
+        return Results.Accepted(
+            statusUrl,
+            new JobAcceptedResponse(job.Id, job.Status, statusUrl, $"{statusUrl}/result"));
     }
+
+    private static async Task<IResult> GetJobAsync(
+        HttpContext context,
+        Guid jobId,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var accountId = context.User.GetAccountId();
+        var job = await db.ImageJobs.AsNoTracking()
+            .Where(x => x.Id == jobId && x.AccountId == accountId)
+            .Select(x => new JobSnapshot(
+                x.Id,
+                x.Status,
+                x.AttemptCount,
+                x.MaxAttempts,
+                x.Width,
+                x.Height,
+                x.InputBytes,
+                x.OutputBytes,
+                x.QueueDurationMs,
+                x.ProcessingDurationMs,
+                x.CpuTimeMs,
+                x.PeakRamBytes,
+                x.QualityScore,
+                x.PriceKopecks,
+                x.BalanceAfterKopecks,
+                x.ErrorCode,
+                x.ErrorMessage,
+                x.CreatedAt,
+                x.StartedAt,
+                x.CompletedAt))
+            .SingleOrDefaultAsync(cancellationToken);
+        if (job is null)
+        {
+            throw new ApiException(404, "job_not_found", "Задание не найдено");
+        }
+        return Results.Ok(ToJobResponse(job));
+    }
+
+    private static async Task<IResult> GetJobResultAsync(
+        HttpContext context,
+        Guid jobId,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var accountId = context.User.GetAccountId();
+        var job = await db.ImageJobs.AsNoTracking()
+            .Where(x => x.Id == jobId && x.AccountId == accountId)
+            .Select(x => new { x.Status, x.OutputData, x.Filename, x.ErrorMessage })
+            .SingleOrDefaultAsync(cancellationToken);
+        if (job is null)
+        {
+            throw new ApiException(404, "job_not_found", "Задание не найдено");
+        }
+        if (job.Status != "success" || job.OutputData is null)
+        {
+            context.Response.Headers.RetryAfter = "1";
+            throw new ApiException(
+                409,
+                job.Status == "failed" ? "job_failed" : "job_not_ready",
+                job.Status == "failed" ? job.ErrorMessage ?? "Задание завершилось ошибкой" : "Задание ещё обрабатывается");
+        }
+        var downloadName = $"{Path.GetFileNameWithoutExtension(job.Filename)}-no-bg.png";
+        return Results.File(job.OutputData, "image/png", downloadName);
+    }
+
+    private static async Task<IResult> GetMetricsAsync(
+        HttpContext context,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var accountId = context.User.GetAccountId();
+        var jobs = await db.ImageJobs.AsNoTracking()
+            .Where(x => x.AccountId == accountId && (x.Status == "success" || x.Status == "failed"))
+            .Select(x => new
+            {
+                x.Status,
+                x.ProcessingDurationMs,
+                x.PeakRamBytes,
+                x.QualityScore
+            })
+            .ToListAsync(cancellationToken);
+        var successful = jobs.Where(x => x.Status == "success").ToList();
+        var durations = successful.Select(x => x.ProcessingDurationMs).Order().ToArray();
+        return Results.Ok(new ProcessingMetricsResponse(
+            jobs.Count,
+            successful.Count,
+            jobs.Count - successful.Count,
+            jobs.Count == 0 ? 0 : (double)successful.Count / jobs.Count,
+            Percentile(durations, 0.50),
+            Percentile(durations, 0.95),
+            jobs.Count == 0 ? 0 : jobs.Max(x => x.PeakRamBytes),
+            successful.Count == 0 ? null : successful.Average(x => x.QualityScore)));
+    }
+
+    private static long? Percentile(long[] sortedValues, double percentile)
+    {
+        if (sortedValues.Length == 0)
+        {
+            return null;
+        }
+        var index = Math.Clamp((int)Math.Ceiling(percentile * sortedValues.Length) - 1, 0, sortedValues.Length - 1);
+        return sortedValues[index];
+    }
+
+    private static JobStatusResponse ToJobResponse(JobSnapshot job) => new(
+        job.Id,
+        job.Status,
+        job.AttemptCount,
+        job.MaxAttempts,
+        job.Width,
+        job.Height,
+        job.InputBytes,
+        job.OutputBytes,
+        job.QueueDurationMs,
+        job.ProcessingDurationMs,
+        job.CpuTimeMs,
+        job.PeakRamBytes,
+        job.QualityScore,
+        BillingService.Rubles(job.PriceKopecks),
+        job.BalanceAfterKopecks is null ? null : BillingService.Rubles(job.BalanceAfterKopecks.Value),
+        job.ErrorCode,
+        job.ErrorMessage,
+        job.CreatedAt,
+        job.StartedAt,
+        job.CompletedAt,
+        job.Status == "success" ? $"/v1/jobs/{job.Id}/result" : null);
+
+    private sealed record JobSnapshot(
+        Guid Id,
+        string Status,
+        int AttemptCount,
+        int MaxAttempts,
+        int Width,
+        int Height,
+        long InputBytes,
+        long OutputBytes,
+        long QueueDurationMs,
+        long ProcessingDurationMs,
+        long CpuTimeMs,
+        long PeakRamBytes,
+        double? QualityScore,
+        long PriceKopecks,
+        long? BalanceAfterKopecks,
+        string? ErrorCode,
+        string? ErrorMessage,
+        DateTime CreatedAt,
+        DateTime? StartedAt,
+        DateTime? CompletedAt);
 
     private static async Task<IResult> GetUsageAsync(
         HttpContext context,

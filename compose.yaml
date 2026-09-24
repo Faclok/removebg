@@ -40,10 +40,14 @@ services:
       Removal__CpuWorkers: ${Removal__CpuWorkers:-1}
       Removal__IntraOpThreads: ${Removal__IntraOpThreads:-6}
       Removal__QueueCapacity: ${Removal__QueueCapacity:-2}
-      Removal__QueueWaitSeconds: ${Removal__QueueWaitSeconds:-30}
       Removal__PngCompressionLevel: ${Removal__PngCompressionLevel:-1}
       Removal__MaxUploadBytes: ${Removal__MaxUploadBytes:-15728640}
       Removal__MaxImagePixels: ${Removal__MaxImagePixels:-40000000}
+      Removal__MaxImageWidth: ${Removal__MaxImageWidth:-10000}
+      Removal__MaxImageHeight: ${Removal__MaxImageHeight:-10000}
+      Removal__MaxAttempts: ${Removal__MaxAttempts:-3}
+      Removal__ProcessingTimeoutSeconds: ${Removal__ProcessingTimeoutSeconds:-300}
+      Removal__RetryDelaySeconds: ${Removal__RetryDelaySeconds:-2}
       Admin__Token: ${Admin__Token:-}
     volumes:
       - removebg-models:/models

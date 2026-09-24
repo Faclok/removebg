@@ -53,6 +53,45 @@ public sealed record UsageResponse(
     decimal ChargedRub,
     IReadOnlyList<UsageItem> Items);
 
+public sealed record JobAcceptedResponse(
+    Guid JobId,
+    string Status,
+    string StatusUrl,
+    string ResultUrl);
+
+public sealed record JobStatusResponse(
+    Guid JobId,
+    string Status,
+    int AttemptCount,
+    int MaxAttempts,
+    int Width,
+    int Height,
+    long InputBytes,
+    long OutputBytes,
+    long QueueDurationMs,
+    long ProcessingDurationMs,
+    long CpuTimeMs,
+    long PeakRamBytes,
+    double? QualityScore,
+    decimal PriceRub,
+    decimal? BalanceAfterRub,
+    string? ErrorCode,
+    string? ErrorMessage,
+    DateTime CreatedAt,
+    DateTime? StartedAt,
+    DateTime? CompletedAt,
+    string? ResultUrl);
+
+public sealed record ProcessingMetricsResponse(
+    int Total,
+    int Successful,
+    int Failed,
+    double SuccessRate,
+    long? ProcessingP50Ms,
+    long? ProcessingP95Ms,
+    long PeakRamBytes,
+    double? AverageQualityScore);
+
 public sealed record TopUpRequest(
     [property: Range(typeof(decimal), "0.01", "9999999999.99")] decimal AmountRub,
     [property: StringLength(300)] string Description = "Административное пополнение");

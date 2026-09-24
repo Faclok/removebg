@@ -39,6 +39,37 @@ public sealed class UsageRecord
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+public sealed class ImageJob
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid RequestId { get; set; }
+    public Guid AccountId { get; set; }
+    public Guid ApiKeyId { get; set; }
+    public required string Status { get; set; }
+    public required string Filename { get; set; }
+    public required string ContentType { get; set; }
+    public required byte[] InputData { get; set; }
+    public byte[]? OutputData { get; set; }
+    public long InputBytes { get; set; }
+    public long OutputBytes { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public int AttemptCount { get; set; }
+    public int MaxAttempts { get; set; }
+    public long PriceKopecks { get; set; }
+    public long? BalanceAfterKopecks { get; set; }
+    public long QueueDurationMs { get; set; }
+    public long ProcessingDurationMs { get; set; }
+    public long CpuTimeMs { get; set; }
+    public long PeakRamBytes { get; set; }
+    public double? QualityScore { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? StartedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+}
+
 public sealed class LedgerEntry
 {
     public Guid Id { get; set; } = Guid.NewGuid();

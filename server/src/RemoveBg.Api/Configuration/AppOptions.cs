@@ -23,11 +23,15 @@ public sealed class RemovalOptions
     public int InputSize { get; init; } = 512;
     public long MaxUploadBytes { get; init; } = 15 * 1024 * 1024;
     public long MaxImagePixels { get; init; } = 40_000_000;
+    public int MaxImageWidth { get; init; } = 10_000;
+    public int MaxImageHeight { get; init; } = 10_000;
     public int CpuWorkers { get; init; }
     public int IntraOpThreads { get; init; }
     public int QueueCapacity { get; init; }
-    public int QueueWaitSeconds { get; init; } = 30;
     public int PngCompressionLevel { get; init; } = 1;
+    public int MaxAttempts { get; init; } = 3;
+    public int ProcessingTimeoutSeconds { get; init; } = 300;
+    public int RetryDelaySeconds { get; init; } = 2;
     public string ExecutionProvider { get; init; } = "Cpu";
     public string CoreMlModelFormat { get; init; } = "NeuralNetwork";
     public string CoreMlComputeUnits { get; init; } = "CPUAndGPU";
@@ -37,8 +41,10 @@ public sealed record RemovalRuntimeSettings(
     int WorkerCount,
     int IntraOpThreads,
     int QueueCapacity,
-    int QueueWaitSeconds,
-    int PngCompressionLevel)
+    int PngCompressionLevel,
+    int MaxAttempts = 3,
+    int ProcessingTimeoutSeconds = 300,
+    int RetryDelaySeconds = 2)
 {
     public static RemovalRuntimeSettings Resolve(RemovalOptions options, int processorCount)
     {
@@ -57,8 +63,10 @@ public sealed record RemovalRuntimeSettings(
             workers,
             intraOpThreads,
             queueCapacity,
-            Math.Max(0, options.QueueWaitSeconds),
-            Math.Clamp(options.PngCompressionLevel, 0, 9));
+            Math.Clamp(options.PngCompressionLevel, 0, 9),
+            Math.Clamp(options.MaxAttempts, 1, 3),
+            Math.Max(1, options.ProcessingTimeoutSeconds),
+            Math.Max(0, options.RetryDelaySeconds));
     }
 }
 

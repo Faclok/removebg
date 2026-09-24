@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi;
 using RemoveBg.Api.Configuration;
@@ -23,7 +24,10 @@ var removalRuntime = RemovalRuntimeSettings.Resolve(
     removalConfiguration,
     Environment.ProcessorCount);
 builder.Services.AddSingleton(removalRuntime);
-builder.Services.AddSingleton<ImageProcessingGate>();
+builder.Services.Configure<FormOptions>(options =>
+    options.MultipartBodyLengthLimit = removalConfiguration.MaxUploadBytes + 64 * 1024);
+builder.Services.AddSingleton<ImageInputValidator>();
+builder.Services.AddSingleton<ImageJobQueue>();
 
 builder.Services.AddDbContext<AppDbContext>((services, options) =>
 {
@@ -43,6 +47,7 @@ builder.Services.AddDbContext<AppDbContext>((services, options) =>
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddSingleton<IBackgroundRemovalService, BackgroundRemovalService>();
 builder.Services.AddHostedService<BackgroundRemovalWarmupService>();
+builder.Services.AddHostedService<ImageJobWorker>();
 builder.Services.AddHttpClient("model-download", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(30);
@@ -102,7 +107,7 @@ app.MapGet("/health/live", () => Results.Ok(new { status = "ok" }))
 app.MapGet("/health/ready", async (
         AppDbContext db,
         IBackgroundRemovalService removal,
-        ImageProcessingGate gate,
+        ImageJobQueue queue,
         RemovalRuntimeSettings runtime,
         CancellationToken cancellationToken) =>
     {
@@ -117,8 +122,8 @@ app.MapGet("/health/ready", async (
                     model = "loading",
                     device = removal.Device,
                     workers = runtime.WorkerCount,
-                    active = gate.ActiveCount,
-                    queued = gate.QueuedCount
+                    active = queue.ActiveCount,
+                    queued = queue.QueuedCount
                 },
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
@@ -131,8 +136,8 @@ app.MapGet("/health/ready", async (
             workers = runtime.WorkerCount,
             intraOpThreads = runtime.IntraOpThreads,
             queueCapacity = runtime.QueueCapacity,
-            active = gate.ActiveCount,
-            queued = gate.QueuedCount
+            active = queue.ActiveCount,
+            queued = queue.QueuedCount
         });
     })
     .WithTags("Health")

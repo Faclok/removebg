@@ -14,11 +14,15 @@ Runtime и возвращает прозрачный PNG. В production-конт
 - MySQL 8.4 и EF Core 10 с автоматическими migrations при запуске;
 - `BiRefNet-general-resolution_512x512-fp16-epoch_216.onnx` через
   `Microsoft.ML.OnnxRuntime` CPU package;
-- параллельная обработка независимых запросов через пул ONNX-сессий, ограниченную
-  очередь и автоматический подбор числа обработчиков;
+- асинхронные задания: загрузка получает `job_id` и `202 Accepted`, а инференс идёт
+  через ограниченную очередь независимо от HTTP-соединения;
+- до двух повторов при таймауте/аварии worker и восстановление незавершённых заданий
+  из MySQL/SQLite после рестарта;
 - декодирование и формирование PNG через SkiaSharp с MIT-лицензией;
 - аккаунты, несколько API-ключей и хранение только SHA-256-хешей ключей;
 - баланс в копейках, ledger и журнал успешных/неуспешных обработок;
+- метрики задания (время, CPU, пиковая RAM, результат и confidence маски) и агрегаты
+  успешности, p50/p95, RAM и качества;
 - атомарное списание после успешного получения результата;
 - помесячные тарифные ступени 0,60 / 0,45 / 0,30 / 0,20 ₽;
 - защищённое ручное пополнение баланса до подключения эквайринга;
@@ -93,9 +97,10 @@ Dockerfile автоматически публикует нативные зав
 В кабинете доступны регистрация, оперативный дашборд, пакетная загрузка и скачивание
 результатов, история до 200 последних запросов с поиском, фильтрами, деталями и
 CSV-экспортом, создание и отзыв API-ключей, калькулятор тарифов, настройки подключения,
-а также ручное административное пополнение. Очередь отправляет до четырёх изображений
-параллельно, ориентируясь на значение `workers` из readiness API. В каждом HTTP-запросе
-находится ровно один файл. API-ключ сохраняется в `localStorage` текущего браузера;
+a также ручное административное пополнение. Кабинет ставит изображения в серверную
+очередь и опрашивает состояния заданий; инференс продолжает работать после завершения
+upload-запроса. В каждом HTTP-запросе находится ровно один файл. API-ключ сохраняется
+в `localStorage` текущего браузера;
 admin-токен не сохраняется.
 
 При первой обработке сервер скачивает ONNX-модель в volume `removebg-models` и проверяет
@@ -190,16 +195,14 @@ curl -sS http://localhost:8000/v1/accounts/register \
 ### Удаление фона
 
 ```bash
-curl -sS http://localhost:8000/v1/remove-background \
+curl -i -sS http://localhost:8000/v1/remove-background \
   -H 'X-API-Key: rb_live_ВАШ_КЛЮЧ' \
-  -F 'image=@product.jpg' \
-  --output product-no-bg.png \
-  --dump-header -
+  -F 'image=@product.jpg'
 ```
 
-Вместо `X-API-Key` поддерживается `Authorization: Bearer rb_live_...`. В заголовках
-ответа возвращаются `X-Charged-Rub`, `X-Balance-Rub`, размеры оригинала и
-`X-Request-ID`.
+Ответ `202` содержит `jobId`, `statusUrl` и `resultUrl`. Опросите `statusUrl` до
+`status: success`, затем скачайте PNG с `resultUrl`, передав тот же API-ключ. Вместо
+`X-API-Key` поддерживается `Authorization: Bearer rb_live_...`.
 
 Полный перечень методов находится в [API.md](API.md).
 
@@ -221,13 +224,17 @@ curl -sS http://localhost:8000/v1/remove-background \
 | `Removal__InputSize` | `512` | фиксированный размер входа модели |
 | `Removal__MaxUploadBytes` | `15728640` | максимум 15 MiB |
 | `Removal__MaxImagePixels` | `40000000` | предел количества пикселей |
+| `Removal__MaxImageWidth` | `10000` | максимальная ширина |
+| `Removal__MaxImageHeight` | `10000` | максимальная высота |
 | `Removal__CpuWorkers` | `0` (авто: `1`) | одновременные инференсы; Compose для 6 CPU задаёт `1` |
 | `Removal__IntraOpThreads` | `0` (авто) | CPU-потоки одного инференса; Compose для 6 CPU задаёт `6` |
 | `Removal__QueueCapacity` | `0` (авто: `workers × 2`) | максимум запросов в очереди инференса |
+| `Removal__MaxAttempts` | `3` | всего попыток обработки (1–3) |
+| `Removal__ProcessingTimeoutSeconds` | `300` | таймаут одной попытки |
+| `Removal__RetryDelaySeconds` | `2` | пауза между повторами |
 | `Removal__ExecutionProvider` | `Cpu` | `Cpu`, `CoreML` или `Auto` |
 | `Removal__CoreMlModelFormat` | `NeuralNetwork` | формат скомпилированной CoreML-модели; совместим с текущей BiRefNet |
 | `Removal__CoreMlComputeUnits` | `CPUAndGPU` | compute units CoreML: `CPUOnly`, `CPUAndGPU`, `CPUAndNeuralEngine` или `ALL` |
-| `Removal__QueueWaitSeconds` | `30` | ожидание свободного обработчика до ответа `429` |
 | `Removal__PngCompressionLevel` | `1` | уровень zlib `0..9`; `1` быстрее стандартного PNG-сжатия |
 | `API_CPU_LIMIT` | `6` | CPU limit API-контейнера в Compose |
 | `API_MEMORY_LIMIT` | `20G` | RAM limit API-контейнера в Compose |

@@ -20,7 +20,12 @@ public interface IBackgroundRemovalService
     Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken);
 }
 
-public sealed record RemovalResult(byte[] Png, int Width, int Height, long DurationMs);
+public sealed record RemovalResult(
+    byte[] Png,
+    int Width,
+    int Height,
+    long DurationMs,
+    double QualityScore = 0);
 
 public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDisposable
 {
@@ -337,6 +342,7 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
         var pixels = options.InputSize * options.InputSize;
         var tensorLength = pixels * 3;
         var tensor = ArrayPool<float>.Shared.Rent(tensorLength);
+        double qualityScore;
         try
         {
             FillInputTensor(resized, tensor, pixels);
@@ -357,6 +363,7 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
             }
 
             NormalizeMaskInPlace(rawMask[..pixels]);
+            qualityScore = CalculateMaskConfidence(rawMask[..pixels]);
             ApplyMask(original, rawMask[..pixels], options.InputSize);
         }
         finally
@@ -378,7 +385,8 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
             output.ToArray(),
             original.Width,
             original.Height,
-            stopwatch.ElapsedMilliseconds);
+            stopwatch.ElapsedMilliseconds,
+            qualityScore);
     }
 
     private void FillInputTensor(SKBitmap bitmap, float[] tensor, int pixels)
@@ -444,6 +452,24 @@ public sealed class BackgroundRemovalService : IBackgroundRemovalService, IDispo
             new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None),
             paint);
         canvas.Flush();
+    }
+
+    internal static double CalculateMaskConfidence(ReadOnlySpan<float> mask)
+    {
+        if (mask.IsEmpty)
+        {
+            return 0;
+        }
+
+        var confident = 0;
+        foreach (var value in mask)
+        {
+            if (value <= 0.1f || value >= 0.9f)
+            {
+                confident++;
+            }
+        }
+        return (double)confident / mask.Length;
     }
 
     private static float Sigmoid(float value)

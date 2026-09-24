@@ -62,6 +62,40 @@ export type Health = {
   queued?: number;
 };
 
+export type JobAccepted = {
+  jobId: string;
+  status: string;
+  statusUrl: string;
+  resultUrl: string;
+};
+
+export type ImageJob = {
+  jobId: string;
+  status: 'queued' | 'processing' | 'success' | 'failed';
+  attemptCount: number;
+  maxAttempts: number;
+  processingDurationMs: number;
+  cpuTimeMs: number;
+  peakRamBytes: number;
+  qualityScore: number | null;
+  priceRub: number;
+  balanceAfterRub: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  resultUrl: string | null;
+};
+
+export type ProcessingMetrics = {
+  total: number;
+  successful: number;
+  failed: number;
+  successRate: number;
+  processingP50Ms: number | null;
+  processingP95Ms: number | null;
+  peakRamBytes: number;
+  averageQualityScore: number | null;
+};
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -125,6 +159,7 @@ export const api = {
     json<Usage>(`/v1/usage?limit=${limit}&offset=${offset}`, {}, apiKey),
   keys: (apiKey: string) => json<ApiKeyView[]>('/v1/api-keys', {}, apiKey),
   health: () => json<Health>('/health/ready'),
+  metrics: (apiKey: string) => json<ProcessingMetrics>('/v1/metrics', {}, apiKey),
 
   createKey: (apiKey: string, name: string) =>
     json<ApiKeyCreated>(
@@ -142,7 +177,8 @@ export const api = {
   },
 
   removeBackground: async (apiKey: string, file: File) => {
-    for (let attempt = 0; attempt < 8; attempt++) {
+    let accepted: JobAccepted | undefined;
+    for (let attempt = 0; attempt < 4; attempt++) {
       const data = new FormData();
       data.append('image', file);
       const response = await fetch('/v1/remove-background', {
@@ -151,19 +187,33 @@ export const api = {
         body: data,
       });
       if (response.ok) {
-        return {
-          blob: await response.blob(),
-          chargedRub: response.headers.get('X-Charged-Rub'),
-          balanceRub: response.headers.get('X-Balance-Rub'),
-        };
+        accepted = (await response.json()) as JobAccepted;
+        break;
       }
 
       const error = await parseError(response);
-      const retryable = error.code === 'server_busy' || error.code === 'model_warming_up';
-      if (!retryable || attempt === 7) throw error;
+      if (error.code !== 'server_busy' || attempt === 3) throw error;
       await delay((error.retryAfterSeconds ?? 2 ** attempt) * 1000);
     }
-    throw new ApiError(503, 'processing_failed', 'Не удалось обработать изображение');
+    if (!accepted) throw new ApiError(503, 'submission_failed', 'Не удалось поставить изображение в очередь');
+
+    for (let poll = 0; poll < 1200; poll++) {
+      const job = await json<ImageJob>(accepted.statusUrl, {}, apiKey);
+      if (job.status === 'failed') {
+        throw new ApiError(422, job.errorCode ?? 'processing_failed', job.errorMessage ?? 'Не удалось обработать изображение');
+      }
+      if (job.status === 'success' && job.resultUrl) {
+        const result = await fetch(job.resultUrl, { headers: { 'X-API-Key': apiKey } });
+        if (!result.ok) throw await parseError(result);
+        return {
+          blob: await result.blob(),
+          chargedRub: job.priceRub,
+          balanceRub: job.balanceAfterRub,
+        };
+      }
+      await delay(500);
+    }
+    throw new ApiError(504, 'job_poll_timeout', 'Истекло время ожидания результата');
   },
 
   topUp: (accountId: string, token: string, amountRub: number, description: string) =>

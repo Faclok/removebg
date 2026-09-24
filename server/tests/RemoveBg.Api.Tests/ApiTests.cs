@@ -2,8 +2,10 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Microsoft.ML.OnnxRuntime;
 using RemoveBg.Api.Configuration;
+using RemoveBg.Api.Infrastructure;
 using RemoveBg.Api.Services;
 using SkiaSharp;
 using Xunit;
@@ -75,6 +77,22 @@ public sealed class ApiTests
     }
 
     [Fact]
+    public void ImageDimensionsAreValidatedBeforeEnqueueing()
+    {
+        var validator = new ImageInputValidator(Options.Create(new RemovalOptions
+        {
+            MaxImageWidth = 0,
+            MaxImageHeight = 10,
+            MaxImagePixels = 100
+        }));
+
+        var exception = Assert.Throws<ApiException>(() =>
+            validator.Validate(SamplePng(), "image/png"));
+
+        Assert.Equal("image_dimensions_too_large", exception.Code);
+    }
+
+    [Fact]
     public async Task RegistrationCreatesApiKeyAndOneThousandRubles()
     {
         using var factory = new ApiFactory();
@@ -101,9 +119,15 @@ public sealed class ApiTests
 
         using var form = ImageForm();
         var response = await client.PostAsync("/v1/remove-background", form);
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("0.60", response.Headers.GetValues("X-Charged-Rub").Single());
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var accepted = await response.Content.ReadFromJsonAsync<JobAcceptedDto>();
+        var job = await WaitForJobAsync(client, accepted!.JobId);
+        Assert.Equal("success", job.Status);
+        Assert.Equal(1, job.AttemptCount);
+        Assert.True(job.PeakRamBytes > 0);
+        var result = await client.GetAsync(job.ResultUrl);
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.Equal("image/png", result.Content.Headers.ContentType?.MediaType);
 
         var balance = await client.GetFromJsonAsync<BalanceDto>("/v1/balance");
         Assert.Equal(999.40m, balance!.BalanceRub);
@@ -122,7 +146,11 @@ public sealed class ApiTests
 
         using var form = ImageForm();
         var response = await client.PostAsync("/v1/remove-background", form);
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var accepted = await response.Content.ReadFromJsonAsync<JobAcceptedDto>();
+        var job = await WaitForJobAsync(client, accepted!.JobId);
+        Assert.Equal("failed", job.Status);
+        Assert.Equal(3, job.AttemptCount);
 
         var balance = await client.GetFromJsonAsync<BalanceDto>("/v1/balance");
         Assert.Equal(1000.00m, balance!.BalanceRub);
@@ -151,20 +179,24 @@ public sealed class ApiTests
     }
 
     [Fact]
-    public async Task RequestBeyondConfiguredConcurrencyIsRejected()
+    public async Task RequestBeyondConfiguredQueueCapacityIsRejected()
     {
         var removal = new BlockingRemovalService();
-        using var factory = new ApiFactory(removalService: removal);
+        using var factory = new ApiFactory(removalService: removal, queueCapacity: 1);
         using var client = factory.CreateClient();
         var account = await RegisterAsync(client, "concurrency@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var firstForm = ImageForm();
-        var firstRequest = client.PostAsync("/v1/remove-background", firstForm);
+        var firstRequest = await client.PostAsync("/v1/remove-background", firstForm);
+        Assert.Equal(HttpStatusCode.Accepted, firstRequest.StatusCode);
         await removal.Started.WaitAsync(TimeSpan.FromSeconds(5));
 
         using var secondForm = ImageForm();
-        var rejected = await client.PostAsync("/v1/remove-background", secondForm);
+        var queued = await client.PostAsync("/v1/remove-background", secondForm);
+        Assert.Equal(HttpStatusCode.Accepted, queued.StatusCode);
+        using var thirdForm = ImageForm();
+        var rejected = await client.PostAsync("/v1/remove-background", thirdForm);
         removal.Release();
 
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
@@ -173,8 +205,10 @@ public sealed class ApiTests
         var error = await rejected.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("server_busy", error.GetProperty("error").GetProperty("code").GetString());
 
-        var completed = await firstRequest;
-        Assert.Equal(HttpStatusCode.OK, completed.StatusCode);
+        var first = await firstRequest.Content.ReadFromJsonAsync<JobAcceptedDto>();
+        var second = await queued.Content.ReadFromJsonAsync<JobAcceptedDto>();
+        Assert.Equal("success", (await WaitForJobAsync(client, first!.JobId)).Status);
+        Assert.Equal("success", (await WaitForJobAsync(client, second!.JobId)).Status);
     }
 
     [Fact]
@@ -197,13 +231,78 @@ public sealed class ApiTests
         };
         await removal.Started.WaitAsync(TimeSpan.FromSeconds(5));
 
-        using var excessForm = ImageForm();
-        var excess = await client.PostAsync("/v1/remove-background", excessForm);
-        Assert.Equal(HttpStatusCode.TooManyRequests, excess.StatusCode);
-
         removal.Release();
         var completed = await Task.WhenAll(requests);
-        Assert.All(completed, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+        Assert.All(completed, response => Assert.Equal(HttpStatusCode.Accepted, response.StatusCode));
+        foreach (var response in completed)
+        {
+            var accepted = await response.Content.ReadFromJsonAsync<JobAcceptedDto>();
+            Assert.Equal("success", (await WaitForJobAsync(client, accepted!.JobId)).Status);
+        }
+    }
+
+    [Fact]
+    public async Task TransientWorkerFailureIsRetriedAndRecorded()
+    {
+        var removal = new FlakyRemovalService(failuresBeforeSuccess: 2);
+        using var factory = new ApiFactory(removalService: removal, maxAttempts: 3);
+        using var client = factory.CreateClient();
+        var account = await RegisterAsync(client, "retry@example.ru");
+        client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
+
+        using var form = ImageForm();
+        var response = await client.PostAsync("/v1/remove-background", form);
+        var accepted = await response.Content.ReadFromJsonAsync<JobAcceptedDto>();
+        var job = await WaitForJobAsync(client, accepted!.JobId);
+
+        Assert.Equal("success", job.Status);
+        Assert.Equal(3, job.AttemptCount);
+        Assert.Equal(3, removal.Calls);
+        var metrics = await client.GetFromJsonAsync<MetricsDto>("/v1/metrics");
+        Assert.Equal(1, metrics!.Successful);
+        Assert.Equal(1, metrics.Total);
+        Assert.NotNull(metrics.ProcessingP50Ms);
+    }
+
+    [Fact]
+    public async Task ProcessingTimeoutIsRetriedOnce()
+    {
+        var removal = new TimeoutRemovalService();
+        using var factory = new ApiFactory(
+            removalService: removal,
+            maxAttempts: 2,
+            processingTimeoutSeconds: 1);
+        using var client = factory.CreateClient();
+        var account = await RegisterAsync(client, "timeout@example.ru");
+        client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
+
+        using var form = ImageForm();
+        var response = await client.PostAsync("/v1/remove-background", form);
+        var accepted = await response.Content.ReadFromJsonAsync<JobAcceptedDto>();
+        var job = await WaitForJobAsync(client, accepted!.JobId, attempts: 160);
+
+        Assert.Equal("failed", job.Status);
+        Assert.Equal(2, job.AttemptCount);
+        Assert.Equal(2, removal.Calls);
+    }
+
+    [Fact]
+    public async Task DeclaredFormatMustMatchActualImage()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+        var account = await RegisterAsync(client, "format@example.ru");
+        client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
+
+        using var content = new ByteArrayContent(SamplePng());
+        content.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+        using var form = new MultipartFormDataContent();
+        form.Add(content, "image", "fake.jpg");
+        var response = await client.PostAsync("/v1/remove-background", form);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("content_type_mismatch", error.GetProperty("error").GetProperty("code").GetString());
     }
 
     [Fact]
@@ -263,7 +362,9 @@ public sealed class ApiTests
         Assert.Equal(0, document.GetProperty("paths").GetProperty("/v1/accounts/register")
             .GetProperty("post").GetProperty("security").GetArrayLength());
         Assert.True(document.GetProperty("paths").GetProperty("/v1/remove-background")
-            .GetProperty("post").GetProperty("responses").GetProperty("200")
+            .GetProperty("post").GetProperty("responses").TryGetProperty("202", out _));
+        Assert.True(document.GetProperty("paths").GetProperty("/v1/jobs/{jobId}/result")
+            .GetProperty("get").GetProperty("responses").GetProperty("200")
             .GetProperty("content").TryGetProperty("image/png", out _));
     }
 
@@ -295,4 +396,26 @@ public sealed class ApiTests
     private sealed record UsageDto(int Successful, decimal ChargedRub);
     private sealed record KeyDto(string ApiKey);
     private sealed record TopUpDto(decimal BalanceRub);
+    private sealed record JobAcceptedDto(Guid JobId);
+    private sealed record JobDto(
+        Guid JobId,
+        string Status,
+        int AttemptCount,
+        long PeakRamBytes,
+        string? ResultUrl);
+    private sealed record MetricsDto(int Total, int Successful, long? ProcessingP50Ms);
+
+    private static async Task<JobDto> WaitForJobAsync(HttpClient client, Guid jobId, int attempts = 100)
+    {
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            var job = await client.GetFromJsonAsync<JobDto>($"/v1/jobs/{jobId}");
+            if (job!.Status is "success" or "failed")
+            {
+                return job;
+            }
+            await Task.Delay(25);
+        }
+        throw new TimeoutException($"Job {jobId} did not finish");
+    }
 }

@@ -52,6 +52,12 @@ public sealed class BillingService(
         string errorCode,
         CancellationToken cancellationToken)
     {
+        if (await db.UsageRecords.AsNoTracking().AnyAsync(
+                x => x.RequestId == requestId,
+                cancellationToken))
+        {
+            return;
+        }
         db.UsageRecords.Add(new UsageRecord
         {
             RequestId = requestId,
@@ -77,6 +83,14 @@ public sealed class BillingService(
         long priceKopecks,
         CancellationToken cancellationToken)
     {
+        if (await db.UsageRecords.AsNoTracking().AnyAsync(
+                x => x.RequestId == requestId && x.Status == "success",
+                cancellationToken))
+        {
+            return await db.Accounts.Where(x => x.Id == accountId)
+                .Select(x => x.BalanceKopecks)
+                .SingleAsync(cancellationToken);
+        }
         var strategy = db.Database.CreateExecutionStrategy();
         return await strategy.ExecuteInTransactionAsync(
             async operationCancellationToken =>

@@ -7,6 +7,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<ApiKey> ApiKeys => Set<ApiKey>();
     public DbSet<UsageRecord> UsageRecords => Set<UsageRecord>();
+    public DbSet<ImageJob> ImageJobs => Set<ImageJob>();
     public DbSet<LedgerEntry> LedgerEntries => Set<LedgerEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -40,6 +41,20 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Status).HasMaxLength(20);
             entity.Property(x => x.Filename).HasMaxLength(255);
             entity.Property(x => x.ErrorCode).HasMaxLength(80);
+        });
+
+        modelBuilder.Entity<ImageJob>(entity =>
+        {
+            entity.ToTable("image_jobs");
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.RequestId).IsUnique();
+            entity.HasIndex(x => new { x.AccountId, x.CreatedAt });
+            entity.HasIndex(x => new { x.Status, x.CreatedAt });
+            entity.Property(x => x.Status).HasMaxLength(20);
+            entity.Property(x => x.Filename).HasMaxLength(255);
+            entity.Property(x => x.ContentType).HasMaxLength(40);
+            entity.Property(x => x.ErrorCode).HasMaxLength(80);
+            entity.Property(x => x.ErrorMessage).HasMaxLength(1000);
         });
 
         modelBuilder.Entity<LedgerEntry>(entity =>

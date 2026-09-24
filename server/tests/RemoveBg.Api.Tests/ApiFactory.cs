@@ -20,20 +20,23 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     private readonly string databasePath;
     private readonly int workerCount;
     private readonly int queueCapacity;
-    private readonly int queueWaitSeconds;
+    private readonly int maxAttempts;
+    private readonly int processingTimeoutSeconds;
 
     public ApiFactory(
         bool failProcessing = false,
         IBackgroundRemovalService? removalService = null,
         int workerCount = 1,
-        int queueCapacity = 0,
-        int queueWaitSeconds = 0)
+        int queueCapacity = 1,
+        int maxAttempts = 3,
+        int processingTimeoutSeconds = 5)
     {
         this.failProcessing = failProcessing;
         this.removalService = removalService;
         this.workerCount = workerCount;
         this.queueCapacity = queueCapacity;
-        this.queueWaitSeconds = queueWaitSeconds;
+        this.maxAttempts = maxAttempts;
+        this.processingTimeoutSeconds = processingTimeoutSeconds;
         var testDirectory = Path.Combine(AppContext.BaseDirectory, "test-data");
         Directory.CreateDirectory(testDirectory);
         databasePath = Path.Combine(testDirectory, $"removebg-tests-{Guid.NewGuid():N}.db");
@@ -51,20 +54,22 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Removal:CpuWorkers"] = workerCount.ToString(),
                 ["Removal:IntraOpThreads"] = "1",
                 ["Removal:QueueCapacity"] = queueCapacity.ToString(),
-                ["Removal:QueueWaitSeconds"] = queueWaitSeconds.ToString()
+                ["Removal:MaxAttempts"] = maxAttempts.ToString(),
+                ["Removal:ProcessingTimeoutSeconds"] = processingTimeoutSeconds.ToString(),
+                ["Removal:RetryDelaySeconds"] = "0"
             });
         });
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<RemovalRuntimeSettings>();
-            services.RemoveAll<ImageProcessingGate>();
             services.AddSingleton(new RemovalRuntimeSettings(
                 workerCount,
                 1,
                 queueCapacity,
-                queueWaitSeconds,
-                1));
-            services.AddSingleton<ImageProcessingGate>();
+                1,
+                maxAttempts,
+                processingTimeoutSeconds,
+                0));
             services.RemoveAll<IDbContextOptionsConfiguration<AppDbContext>>();
             services.RemoveAll<DbContextOptions<AppDbContext>>();
             services.AddDbContext<AppDbContext>(options =>
@@ -142,5 +147,43 @@ public sealed class FakeRemovalService(bool failProcessing) : IBackgroundRemoval
             throw new Infrastructure.ApiException(503, "processing_failed", "Тестовая ошибка");
         }
         return Task.FromResult(new RemovalResult(Png, 1, 1, 1));
+    }
+}
+
+public sealed class FlakyRemovalService(int failuresBeforeSuccess) : IBackgroundRemovalService
+{
+    private static readonly byte[] Png = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    private int calls;
+
+    public bool IsReady => true;
+    public string Device => "test";
+    public int Calls => Volatile.Read(ref calls);
+
+    public Task WarmUpAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
+    {
+        if (Interlocked.Increment(ref calls) <= failuresBeforeSuccess)
+        {
+            throw new InvalidOperationException("Transient worker failure");
+        }
+        return Task.FromResult(new RemovalResult(Png, 1, 1, 7, 0.95));
+    }
+}
+
+public sealed class TimeoutRemovalService : IBackgroundRemovalService
+{
+    private int calls;
+    public bool IsReady => true;
+    public string Device => "test";
+    public int Calls => Volatile.Read(ref calls);
+    public Task WarmUpAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public async Task<RemovalResult> RemoveAsync(byte[] input, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref calls);
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("Unreachable");
     }
 }

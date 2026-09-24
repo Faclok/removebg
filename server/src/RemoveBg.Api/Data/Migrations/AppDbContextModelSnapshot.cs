@@ -92,6 +92,111 @@ namespace RemoveBg.Api.Data.Migrations
                     b.ToTable("api_keys", (string)null);
                 });
 
+            modelBuilder.Entity("RemoveBg.Api.Data.ImageJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<Guid>("ApiKeyId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<long?>("BalanceAfterKopecks")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("varchar(40)");
+
+                    b.Property<long>("CpuTimeMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ErrorCode")
+                        .HasMaxLength(80)
+                        .HasColumnType("varchar(80)");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(1000)
+                        .HasColumnType("varchar(1000)");
+
+                    b.Property<string>("Filename")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
+                    b.Property<int>("Height")
+                        .HasColumnType("int");
+
+                    b.Property<long>("InputBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("InputData")
+                        .IsRequired()
+                        .HasColumnType("longblob");
+
+                    b.Property<int>("MaxAttempts")
+                        .HasColumnType("int");
+
+                    b.Property<long>("OutputBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("OutputData")
+                        .HasColumnType("longblob");
+
+                    b.Property<long>("PeakRamBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("PriceKopecks")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ProcessingDurationMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<double?>("QualityScore")
+                        .HasColumnType("double");
+
+                    b.Property<long>("QueueDurationMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)");
+
+                    b.Property<int>("Width")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("AccountId", "CreatedAt");
+
+                    b.HasIndex("Status", "CreatedAt");
+
+                    b.ToTable("image_jobs", (string)null);
+                });
+
             modelBuilder.Entity("RemoveBg.Api.Data.LedgerEntry", b =>
                 {
                     b.Property<Guid>("Id")
