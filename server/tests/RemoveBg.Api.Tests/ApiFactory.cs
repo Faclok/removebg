@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -22,6 +23,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     private readonly int queueCapacity;
     private readonly int maxAttempts;
     private readonly int processingTimeoutSeconds;
+    public FakeAccountEmailSender EmailSender { get; } = new();
 
     public ApiFactory(
         bool failProcessing = false,
@@ -80,6 +82,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IBackgroundRemovalService>();
             services.AddSingleton(
                 removalService ?? new FakeRemovalService(failProcessing));
+            services.RemoveAll<IAccountEmailSender>();
+            services.AddSingleton<IAccountEmailSender>(EmailSender);
         });
     }
 
@@ -96,6 +100,37 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         }
     }
 }
+
+public sealed class FakeAccountEmailSender : IAccountEmailSender
+{
+    private readonly ConcurrentQueue<SentRegistrationEmail> sent = new();
+
+    public bool FailDelivery { get; set; }
+    public IReadOnlyCollection<SentRegistrationEmail> Sent => sent.ToArray();
+
+    public Task SendRegistrationPasswordAsync(
+        string recipientName,
+        string recipientEmail,
+        string password,
+        CancellationToken cancellationToken)
+    {
+        if (FailDelivery)
+        {
+            throw new EmailDeliveryException("Test email failure");
+        }
+
+        sent.Enqueue(new SentRegistrationEmail(recipientName, recipientEmail, password));
+        return Task.CompletedTask;
+    }
+
+    public string PasswordFor(string email) =>
+        sent.Last(x => x.RecipientEmail == email).Password;
+}
+
+public sealed record SentRegistrationEmail(
+    string RecipientName,
+    string RecipientEmail,
+    string Password);
 
 internal sealed class TestRetryingExecutionStrategy(ExecutionStrategyDependencies dependencies)
     : ExecutionStrategy(dependencies, 1, TimeSpan.Zero)

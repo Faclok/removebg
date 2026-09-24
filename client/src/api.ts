@@ -6,7 +6,6 @@ export type PricingTier = {
 
 export type RegisterResponse = {
   accountId: string;
-  apiKey: string;
   balanceRub: number;
   message: string;
 };

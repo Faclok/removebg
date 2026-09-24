@@ -97,10 +97,11 @@ public sealed class ApiTests
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client);
+        var account = await RegisterAsync(factory, client);
 
         Assert.StartsWith("rb_live_", account.ApiKey);
         Assert.Equal(1000.00m, account.BalanceRub);
+        Assert.Single(factory.EmailSender.Sent);
 
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
         var balance = await client.GetFromJsonAsync<BalanceDto>("/v1/balance");
@@ -114,7 +115,7 @@ public sealed class ApiTests
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client);
+        var account = await RegisterAsync(factory, client);
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var form = ImageForm();
@@ -141,7 +142,7 @@ public sealed class ApiTests
     {
         using var factory = new ApiFactory(failProcessing: true);
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "failure@example.ru");
+        var account = await RegisterAsync(factory, client, "failure@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var form = ImageForm();
@@ -164,7 +165,7 @@ public sealed class ApiTests
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "two-images@example.ru");
+        var account = await RegisterAsync(factory, client, "two-images@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var form = ImageForm();
@@ -184,7 +185,7 @@ public sealed class ApiTests
         var removal = new BlockingRemovalService();
         using var factory = new ApiFactory(removalService: removal, queueCapacity: 1);
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "concurrency@example.ru");
+        var account = await RegisterAsync(factory, client, "concurrency@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var firstForm = ImageForm();
@@ -217,7 +218,7 @@ public sealed class ApiTests
         var removal = new BlockingRemovalService(expectedStarts: 3);
         using var factory = new ApiFactory(removalService: removal, workerCount: 3);
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "parallel@example.ru");
+        var account = await RegisterAsync(factory, client, "parallel@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var firstForm = ImageForm();
@@ -247,7 +248,7 @@ public sealed class ApiTests
         var removal = new FlakyRemovalService(failuresBeforeSuccess: 2);
         using var factory = new ApiFactory(removalService: removal, maxAttempts: 3);
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "retry@example.ru");
+        var account = await RegisterAsync(factory, client, "retry@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var form = ImageForm();
@@ -273,7 +274,7 @@ public sealed class ApiTests
             maxAttempts: 2,
             processingTimeoutSeconds: 1);
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "timeout@example.ru");
+        var account = await RegisterAsync(factory, client, "timeout@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var form = ImageForm();
@@ -291,7 +292,7 @@ public sealed class ApiTests
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client, "format@example.ru");
+        var account = await RegisterAsync(factory, client, "format@example.ru");
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         using var content = new ByteArrayContent(SamplePng());
@@ -310,7 +311,7 @@ public sealed class ApiTests
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        await RegisterAsync(client);
+        await RegisterAsync(factory, client);
 
         var duplicate = await client.PostAsJsonAsync(
             "/v1/accounts/register",
@@ -323,11 +324,31 @@ public sealed class ApiTests
     }
 
     [Fact]
+    public async Task FailedEmailDeliveryRollsBackRegistration()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+        factory.EmailSender.FailDelivery = true;
+
+        var failed = await client.PostAsJsonAsync(
+            "/v1/accounts/register",
+            new { name = "ООО Тест", email = "mail-failure@example.ru" });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+        var error = await failed.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("email_delivery_failed", error.GetProperty("error").GetProperty("code").GetString());
+
+        factory.EmailSender.FailDelivery = false;
+        var account = await RegisterAsync(factory, client, "mail-failure@example.ru");
+        Assert.StartsWith("rb_live_", account.ApiKey);
+    }
+
+    [Fact]
     public async Task AdditionalKeyAndAdminTopUpWork()
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        var account = await RegisterAsync(client);
+        var account = await RegisterAsync(factory, client);
         client.DefaultRequestHeaders.Add("X-API-Key", account.ApiKey);
 
         var created = await client.PostAsJsonAsync("/v1/api-keys", new { name = "mobile-app" });
@@ -368,7 +389,8 @@ public sealed class ApiTests
             .GetProperty("content").TryGetProperty("image/png", out _));
     }
 
-    private static async Task<RegisterDto> RegisterAsync(
+    private static async Task<RegisteredAccount> RegisterAsync(
+        ApiFactory factory,
         HttpClient client,
         string email = "test@example.ru")
     {
@@ -376,7 +398,15 @@ public sealed class ApiTests
             "/v1/accounts/register",
             new { name = "ООО Тест", email });
         response.EnsureSuccessStatusCode();
-        return (await response.Content.ReadFromJsonAsync<RegisterDto>())!;
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("\"apiKey\"", body);
+        var registration = JsonSerializer.Deserialize<RegisterDto>(
+            body,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        return new RegisteredAccount(
+            registration.AccountId,
+            factory.EmailSender.PasswordFor(email),
+            registration.BalanceRub);
     }
 
     private static MultipartFormDataContent ImageForm()
@@ -391,7 +421,8 @@ public sealed class ApiTests
     private static byte[] SamplePng() => Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
-    private sealed record RegisterDto(Guid AccountId, string ApiKey, decimal BalanceRub);
+    private sealed record RegisterDto(Guid AccountId, decimal BalanceRub, string Message);
+    private sealed record RegisteredAccount(Guid AccountId, string ApiKey, decimal BalanceRub);
     private sealed record BalanceDto(decimal BalanceRub, decimal NextImagePriceRub);
     private sealed record UsageDto(int Successful, decimal ChargedRub);
     private sealed record KeyDto(string ApiKey);

@@ -6,7 +6,7 @@ public sealed record RegisterRequest(
     [property: Required, StringLength(200, MinimumLength = 1)] string Name,
     [property: Required, EmailAddress, StringLength(320)] string Email);
 
-public sealed record RegisterResponse(Guid AccountId, string ApiKey, decimal BalanceRub, string Message);
+public sealed record RegisterResponse(Guid AccountId, decimal BalanceRub, string Message);
 
 public sealed record CreateApiKeyRequest(
     [property: Required, StringLength(100, MinimumLength = 1)] string Name);

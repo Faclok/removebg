@@ -26,9 +26,10 @@ public static class ApiEndpoints
 
         api.MapPost("/accounts/register", RegisterAsync)
             .WithName("RegisterAccount")
-            .WithSummary("Создать аккаунт и получить первый API-ключ")
+            .WithSummary("Создать аккаунт и отправить пароль на email")
             .Produces<RegisterResponse>(201)
             .Produces<ErrorEnvelope>(409)
+            .Produces<ErrorEnvelope>(503)
             .AllowAnonymous();
 
         var authorized = api.MapGroup(string.Empty).RequireAuthorization();
@@ -92,6 +93,7 @@ public static class ApiEndpoints
     private static async Task<IResult> RegisterAsync(
         RegisterRequest request,
         AppDbContext db,
+        IAccountEmailSender emailSender,
         IOptions<AccountOptions> options,
         CancellationToken cancellationToken)
     {
@@ -141,13 +143,32 @@ public static class ApiEndpoints
             throw new ApiException(409, "email_exists", "Аккаунт с таким email уже существует");
         }
 
+        try
+        {
+            await emailSender.SendRegistrationPasswordAsync(
+                account.Name,
+                account.Email,
+                issued.Raw,
+                CancellationToken.None);
+        }
+        catch (EmailDeliveryException)
+        {
+            db.ApiKeys.RemoveRange(db.ApiKeys.Local.Where(x => x.AccountId == account.Id));
+            db.LedgerEntries.RemoveRange(db.LedgerEntries.Local.Where(x => x.AccountId == account.Id));
+            db.Accounts.Remove(account);
+            await db.SaveChangesAsync(CancellationToken.None);
+            throw new ApiException(
+                503,
+                "email_delivery_failed",
+                "Не удалось отправить пароль. Проверьте email и попробуйте ещё раз");
+        }
+
         return Results.Created(
             $"/v1/balance",
             new RegisterResponse(
                 account.Id,
-                issued.Raw,
                 BillingService.Rubles(account.BalanceKopecks),
-                "Сохраните API-ключ: повторно он показан не будет"));
+                "Пароль направлен на указанный email"));
     }
 
     private static async Task<IResult> GetBalanceAsync(

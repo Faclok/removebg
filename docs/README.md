@@ -55,7 +55,7 @@ Nginx отдаёт кабинет с `/` и перенаправляет `/v1`, 
 
 ```bash
 cp .env.example .env
-# Замените пароли MySQL и Admin__Token в .env
+# Замените пароли MySQL, SMTP и Admin__Token в .env
 docker compose -f compose.yaml -f compose.local.yaml up --build
 ```
 
@@ -77,6 +77,14 @@ MYSQL_USER=removebg
 MYSQL_PASSWORD=замените-на-длинный-пароль
 MYSQL_ROOT_PASSWORD=замените-на-другой-длинный-пароль
 Admin__Token=замените-на-длинную-случайную-строку
+Email__Host=smtp.example.com
+Email__Port=587
+Email__EnableSsl=true
+Email__Username=mailer@example.com
+Email__Password=замените-на-пароль-smtp
+Email__FromAddress=mailer@example.com
+Email__FromName=Удалифон
+Email__LoginUrl=https://ваш-домен.example/
 ```
 
 Переменные объявлены непосредственно в `compose.yaml`, поэтому отдельный файл `.env`
@@ -94,10 +102,10 @@ Dockerfile автоматически публикует нативные зав
 - OpenAPI JSON: <http://localhost:8000/swagger/v1/swagger.json>
 - readiness: <http://localhost:8000/health/ready>
 
-В кабинете доступны регистрация, оперативный дашборд, пакетная загрузка и скачивание
-результатов, история до 200 последних запросов с поиском, фильтрами, деталями и
-CSV-экспортом, создание и отзыв API-ключей, калькулятор тарифов, настройки подключения,
-a также ручное административное пополнение. Кабинет ставит изображения в серверную
+В кабинете доступны регистрация с отправкой пароля по email, оперативный дашборд,
+пакетная загрузка и скачивание результатов, история до 200 последних запросов с
+поиском, фильтрами, деталями и CSV-экспортом, создание и отзыв API-ключей, калькулятор
+тарифов, настройки подключения, a также ручное административное пополнение. Кабинет ставит изображения в серверную
 очередь и опрашивает состояния заданий; инференс продолжает работать после завершения
 upload-запроса. В каждом HTTP-запросе находится ровно один файл. API-ключ сохраняется
 в `localStorage` текущего браузера;
@@ -189,8 +197,8 @@ curl -sS http://localhost:8000/v1/accounts/register \
   -d '{"name":"ООО Ромашка","email":"api@example.ru"}'
 ```
 
-Ответ содержит `apiKey` и `balanceRub: 1000.00`. Секрет ключа показывается только один
-раз.
+Ответ содержит `accountId`, `balanceRub: 1000.00` и подтверждение отправки. Первый
+API-ключ приходит на указанный email как пароль для входа и не возвращается в HTTP-ответе.
 
 ### Удаление фона
 
@@ -219,6 +227,14 @@ curl -i -sS http://localhost:8000/v1/remove-background \
 | `MYSQL_PASSWORD` | обязательна | пароль приложения |
 | `MYSQL_ROOT_PASSWORD` | обязательна | root-пароль MySQL |
 | `Accounts__StartingBalanceKopecks` | `100000` | 1000 ₽ новому аккаунту |
+| `Email__Host` | пусто | SMTP-сервер; без него регистрация вернёт `503` |
+| `Email__Port` | `587` | порт SMTP |
+| `Email__EnableSsl` | `true` | использовать TLS для SMTP |
+| `Email__Username` | пусто | имя пользователя SMTP |
+| `Email__Password` | пусто | пароль SMTP |
+| `Email__FromAddress` | пусто | адрес отправителя; обязателен для регистрации |
+| `Email__FromName` | `Удалифон` | имя отправителя |
+| `Email__LoginUrl` | `http://localhost:8000/` | ссылка на вход в письме |
 | `Removal__ModelPath` | `models/birefnet-general-512-fp16.onnx` | локальный ONNX-файл |
 | `Removal__ModelSha256` | закреплён в `appsettings.json` | SHA-256 официального файла модели |
 | `Removal__InputSize` | `512` | фиксированный размер входа модели |

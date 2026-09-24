@@ -14,6 +14,19 @@ public sealed class AccountOptions
     public long StartingBalanceKopecks { get; init; } = 100_000;
 }
 
+public sealed class EmailOptions
+{
+    public const string SectionName = "Email";
+    public string Host { get; init; } = string.Empty;
+    public int Port { get; init; } = 587;
+    public bool EnableSsl { get; init; } = true;
+    public string Username { get; init; } = string.Empty;
+    public string Password { get; init; } = string.Empty;
+    public string FromAddress { get; init; } = string.Empty;
+    public string FromName { get; init; } = "Удалифон";
+    public string LoginUrl { get; init; } = "http://localhost:8000/";
+}
+
 public sealed class RemovalOptions
 {
     public const string SectionName = "Removal";

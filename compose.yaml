@@ -35,6 +35,14 @@ services:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       Database__ConnectionString: "Server=mysql;Port=3306;Database=${MYSQL_DATABASE:-removebg};User=${MYSQL_USER:-removebg};Password=${MYSQL_PASSWORD:?MYSQL_PASSWORD is required};SslMode=Preferred;AllowPublicKeyRetrieval=True"
       Accounts__StartingBalanceKopecks: ${Accounts__StartingBalanceKopecks:-100000}
+      Email__Host: ${Email__Host:-}
+      Email__Port: ${Email__Port:-587}
+      Email__EnableSsl: ${Email__EnableSsl:-true}
+      Email__Username: ${Email__Username:-}
+      Email__Password: ${Email__Password:-}
+      Email__FromAddress: ${Email__FromAddress:-}
+      Email__FromName: ${Email__FromName:-Удалифон}
+      Email__LoginUrl: ${Email__LoginUrl:-http://localhost:8000/}
       Removal__ModelPath: /models/birefnet-general-512-fp16.onnx
       Removal__InputSize: ${Removal__InputSize:-512}
       Removal__CpuWorkers: ${Removal__CpuWorkers:-1}
