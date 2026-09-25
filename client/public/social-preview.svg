@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(180 160) rotate(35) scale(650 540)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#194b4b"/>
+      <stop offset="1" stop-color="#08141e" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="checker" width="28" height="28" patternUnits="userSpaceOnUse">
+      <rect width="28" height="28" fill="#d6e2df"/>
+      <path d="M0 0h14v14H0zm14 14h14v14H14z" fill="#f3fbf8"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="#08141e"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <circle cx="70" cy="80" r="250" fill="none" stroke="#3de1b5" stroke-opacity=".10"/>
+  <circle cx="70" cy="80" r="340" fill="none" stroke="#3de1b5" stroke-opacity=".06"/>
+  <g transform="translate(72 64)">
+    <rect width="66" height="66" rx="18" fill="#3de1b5"/>
+    <path d="M18 15v25c0 10.5 5.8 15.8 15.2 15.8S49 50.5 49 40V15h-9.4v24.2c0 5.4-2 8-6.4 8s-5.8-2.6-5.8-8V15z" fill="#08141e"/>
+    <path d="M48 46h18v20H48z" fill="url(#checker)"/>
+    <text x="86" y="46" fill="#f3fbf8" font-family="Arial, sans-serif" font-size="30" font-weight="700">Удалифон</text>
+  </g>
+  <text x="72" y="260" fill="#f3fbf8" font-family="Arial, sans-serif" font-size="70" font-weight="700" letter-spacing="-2">Удаляйте фон с фото</text>
+  <text x="72" y="340" fill="#3de1b5" font-family="Arial, sans-serif" font-size="70" font-weight="700" letter-spacing="-2">быстро и точно</text>
+  <text x="76" y="410" fill="#9ab0b7" font-family="Arial, sans-serif" font-size="26">Готовые PNG с прозрачным фоном — без ручной обработки</text>
+  <g transform="translate(76 482)" font-family="Arial, sans-serif" font-size="20">
+    <text x="0" y="0" fill="#3de1b5">✓</text><text x="28" y="0" fill="#d5e4e1">До 100 фото за раз</text>
+    <text x="290" y="0" fill="#3de1b5">✓</text><text x="318" y="0" fill="#d5e4e1">JPEG, PNG и WebP</text>
+    <text x="590" y="0" fill="#3de1b5">✓</text><text x="618" y="0" fill="#d5e4e1">Плата только за результат</text>
+  </g>
+  <g transform="translate(1010 70)">
+    <rect x="0" y="0" width="118" height="118" rx="28" fill="#3de1b5"/>
+    <path d="M32 26v45c0 19 10 28 27 28s29-9 29-28V26H71v43c0 10-4 14-12 14s-10-4-10-14V26z" fill="#08141e"/>
+    <path d="M84 82h34v36H84z" fill="url(#checker)"/>
+  </g>
+</svg>

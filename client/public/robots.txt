@@ -4,3 +4,5 @@ Allow: /
 Disallow: /v1/
 Disallow: /health/
 Disallow: /swagger/
+
+Sitemap: __SITE_URL__/sitemap.xml
