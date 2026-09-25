@@ -1,0 +1,13 @@
+{
+  "name": "Удалифон — удаление фона с фото",
+  "short_name": "Удалифон",
+  "description": "Автоматическое удаление фона с изображений онлайн",
+  "lang": "ru",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08141E",
+  "theme_color": "#08141E",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

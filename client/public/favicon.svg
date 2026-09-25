@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Удалифон">
+  <defs>
+    <pattern id="checker" width="8" height="8" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#d9e5e2"/>
+      <path d="M0 0h4v4H0zm4 4h4v4H4z" fill="#f3fbf8"/>
+    </pattern>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#3de1b5"/>
+  <path d="M18 14v22c0 10 5.7 15 14.2 15S47 46 47 36V14h-9v21.4c0 5.1-1.8 7.4-5.8 7.4s-5.2-2.3-5.2-7.4V14z" fill="#08141e"/>
+  <path d="M43 43h21v21H43z" fill="url(#checker)"/>
+</svg>
